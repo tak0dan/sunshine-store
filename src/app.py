@@ -78,9 +78,12 @@ def letter_icon(text: str, color: str, size: int = 56) -> QPixmap:
 
 
 def app_icon(pkg: bk.Pkg, size: int = 56) -> QPixmap:
-    ic = QIcon.fromTheme(pkg.app_id or pkg.name)
-    if not ic.isNull():
-        return ic.pixmap(size, size)
+    for cand in (pkg.icon, pkg.app_id, pkg.name):
+        if not cand:
+            continue
+        ic = QIcon(cand) if os.path.isabs(cand) else QIcon.fromTheme(cand)
+        if not ic.isNull():
+            return ic.pixmap(size, size)
     return letter_icon(pkg.name, FRAME[pkg.source] if pkg.source != "pacman" else ACCENT, size)
 
 
@@ -91,15 +94,16 @@ def frame_color(app: bk.App, pkg: bk.Pkg) -> str:
 class Card(QFrame):
     clicked = pyqtSignal(object)
 
-    def __init__(self, app: bk.App, order):
-        super().__init__()
+    def __init__(self, app: bk.App, order, parent=None):
+        super().__init__(parent)
         self.app = app
         pkg = app.pick(order)
         col = frame_color(app, pkg)
         self.setObjectName("card")
         self.setStyleSheet(f"QFrame#card {{ border: 2px solid {col}; border-radius: 14px; background: #262238; }}"
                            f"QFrame#card:hover {{ background: #2f2a47; }} QLabel {{ background: transparent; }}")
-        self.setFixedSize(250, 150)
+        self.setFixedHeight(150)
+        self.setMinimumWidth(240)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 12, 14, 12)
@@ -123,6 +127,37 @@ class Card(QFrame):
 
     def mousePressEvent(self, e):
         self.clicked.emit(self.app)
+
+
+class CardFlow(QWidget):
+    """Lays cards out in as many equal columns as fit; cards grow to fill the row (no gaps, any window size)."""
+    GAP, MIN_W = 14, 250
+
+    def __init__(self):
+        super().__init__()
+        self.cards = []
+
+    def add(self, card):
+        card.setParent(self)
+        self.cards.append(card)
+        card.show()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self.relayout()
+
+    def relayout(self):
+        w = self.width()
+        if w <= 0 or not self.cards:
+            return
+        cols = max(1, (w + self.GAP) // (self.MIN_W + self.GAP))
+        cw = (w - (cols - 1) * self.GAP) // cols
+        ch = self.cards[0].height()
+        for i, c in enumerate(self.cards):
+            r, col = divmod(i, cols)
+            c.setGeometry(col * (cw + self.GAP), r * (ch + self.GAP), cw, ch)
+        rows = (len(self.cards) + cols - 1) // cols
+        self.setMinimumHeight(rows * (ch + self.GAP) - self.GAP)
 
 
 class Grid(QScrollArea):
@@ -158,14 +193,12 @@ class Grid(QScrollArea):
             self.vbox.addWidget(s)
 
     def cards(self, apps, order, on_click):
-        g = QGridLayout()
-        g.setSpacing(14)
-        width = max(1, (self.viewport().width() - 56) // 264)
-        for i, a in enumerate(apps):
-            c = Card(a, order)
+        flow = CardFlow()
+        for app in apps:
+            c = Card(app, order, flow)
             c.clicked.connect(on_click)
-            g.addWidget(c, i // width, i % width, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        self.vbox.addLayout(g)
+            flow.add(c)
+        self.vbox.addWidget(flow)
 
     def message(self, text):
         m = QLabel(text)
@@ -344,6 +377,7 @@ class Store(QWidget):
         self.setWindowTitle("Sunshine Store")
         self.resize(1180, 760)
         self.order = bk.DEFAULT_ORDER
+        self.show_all = False
         self.procs = []
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -415,7 +449,7 @@ class Store(QWidget):
         elif key == "installed":
             self.list.heading("Installed", "Apps you added yourself, from every source")
             self.list.message("Loading…")
-            self._t = Task(bk.list_installed)
+            self._t = Task(bk.list_installed, not self.show_all)
             self._t.done.connect(self.installed_ready)
             self._t.start()
         else:
@@ -423,8 +457,15 @@ class Store(QWidget):
             self.list.message("Use “Update System” from the menu: it updates pacman, AUR and Flatpak together, safely.")
 
     def installed_ready(self, pkgs):
+        if isinstance(pkgs, Exception):
+            pkgs = []
         self.list.clear()
-        self.list.heading("Installed", f"{len(pkgs)} apps and tools")
+        self.list.heading("Installed", f"{len(pkgs)} " + ("packages, including system tools" if self.show_all else "apps"))
+        tog = QPushButton("Show apps only" if self.show_all else "Show all packages (including system)")
+        tog.setFixedWidth(300)
+        tog.clicked.connect(self.toggle_all)
+        self.list.vbox.addWidget(tog)
+        self.list.vbox.addSpacing(10)
         apps = []
         for p in pkgs:
             a = bk.App(p.name)
@@ -432,6 +473,10 @@ class Store(QWidget):
             apps.append(a)
         self.list.cards(apps, self.order, self.open_app)
         self.list.vbox.addStretch(1)
+
+    def toggle_all(self):
+        self.show_all = not self.show_all
+        self.go("installed")
 
     def show_home(self):
         self.list.heading("Welcome", "Search above, or pick something from the shelves below.")
@@ -508,6 +553,9 @@ def main():
     app = QApplication(sys.argv)
     app.setStyleSheet(STYLE)
     w = Store()
+    if "--size" in sys.argv:
+        sw, sh = sys.argv[sys.argv.index("--size") + 1].split("x")
+        w.resize(int(sw), int(sh))
     w.show()
     if "--shot" in sys.argv:            # test helper: render a screenshot and quit
         from PyQt6.QtCore import QTimer

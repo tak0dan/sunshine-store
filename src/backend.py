@@ -28,6 +28,7 @@ class Pkg:
     app_id: str = ""               # flatpak application id
     maintainer: str = ""
     out_of_date: bool = False
+    icon: str = ""                # theme icon name or absolute path (installed apps)
 
     @property
     def ident(self) -> str:
@@ -208,14 +209,64 @@ def argv_for(p: Pkg, remove: bool = False) -> list:
     return ["flatpak", "install", "-y", "--noninteractive", "flathub", p.app_id]
 
 
-def list_installed() -> list:
-    """Explicitly installed pacman/AUR packages and Flatpak apps."""
-    pkgs = []
+def _desktop_entries() -> dict:
+    """{desktop-file path: (Icon, NoDisplay)} for installed applications."""
+    import glob
+    out = {}
+    for path in glob.glob("/usr/share/applications/*.desktop"):
+        icon, hidden, kind = "", False, ""
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    if line.startswith("["):
+                        if line.strip() != "[Desktop Entry]" and kind:
+                            break
+                    elif line.startswith("Icon="):
+                        icon = line[5:].strip()
+                    elif line.startswith(("NoDisplay=true", "Hidden=true")):
+                        hidden = True
+                    elif line.startswith("Type="):
+                        kind = line[5:].strip()
+        except OSError:
+            continue
+        if kind == "Application" and not hidden:
+            out[path] = icon
+    return out
+
+
+def _pacman_infos() -> dict:
+    """{name: (version, description)} for every installed package, in one pacman call."""
+    infos = {}
+    for block in _run(["pacman", "-Qi"], 60).split("\n\n"):
+        f = dict(re.findall(r"^(Name|Version|Description)\s*:\s*(.*)$", block, re.M))
+        if "Name" in f:
+            infos[f["Name"]] = (f.get("Version", ""), f.get("Description", ""))
+    return infos
+
+
+def list_installed(apps_only: bool = True) -> list:
+    """Installed pacman/AUR packages and Flatpak apps. apps_only hides libraries and system tools
+    (keeps explicitly installed packages that ship a launcher)."""
+    infos = _pacman_infos()
     foreign = set(_run(["pacman", "-Qmq"]).split())
-    for line in _run(["pacman", "-Qeq"]).split():
-        pkgs.append(Pkg(name=line, source="aur" if line in foreign else "pacman", installed=True))
+    explicit = set(_run(["pacman", "-Qeq"]).split())
+    icons = {}                                    # package -> icon of its launcher
+    if apps_only:
+        entries = _desktop_entries()
+        out = _run(["pacman", "-Qo", *entries.keys()], 60) if entries else ""
+        for m in re.finditer(r"^(\S+) is owned by (\S+) ", out, re.M):
+            icons.setdefault(m.group(2), entries.get(m.group(1), ""))
+        names = [n for n in sorted(explicit) if n in icons]
+    else:
+        names = sorted(explicit)
+    pkgs = []
+    for n in names:
+        ver, desc = infos.get(n, ("", ""))
+        pkgs.append(Pkg(name=n, source="aur" if n in foreign else "pacman", installed=True,
+                        version=ver, desc=desc, icon=icons.get(n, "")))
     for fid in sorted(installed_flatpak()):
-        pkgs.append(Pkg(name=fid.rsplit(".", 1)[-1], source="flatpak", app_id=fid, repo="flathub", installed=True))
+        pkgs.append(Pkg(name=fid.rsplit(".", 1)[-1], source="flatpak", app_id=fid, repo="flathub",
+                        installed=True, icon=fid))
     return pkgs
 
 
