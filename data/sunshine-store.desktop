@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Sunshine Store
+Comment=Install apps from pacman, the AUR and Flatpak
+Exec=sunshine-store
+Icon=sunshine-store
+Categories=System;PackageManager;
+Keywords=store;apps;software;aur;pacman;flatpak;
