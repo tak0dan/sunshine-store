@@ -6,6 +6,7 @@ install:
 	install -Dm644 src/app.py      $(LIB)/app.py
 	install -Dm644 src/backend.py  $(LIB)/backend.py
 	install -Dm644 src/index.py    $(LIB)/index.py
+	install -Dm644 src/themes.py   $(LIB)/themes.py
 	install -Dm644 src/appimage.py $(LIB)/appimage.py
 	install -dm755 $(DESTDIR)$(PREFIX)/bin
 	printf '#!/bin/sh\nexec python3 $(PREFIX)/lib/sunshine-store/app.py "$$@"\n'      > $(DESTDIR)$(PREFIX)/bin/sunshine-store

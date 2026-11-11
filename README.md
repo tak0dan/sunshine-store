@@ -16,13 +16,17 @@ Built for [Sunshine OS](https://github.com/tak0dan); works on any Arch system.
   **green = installed**. You choose the source order (default AUR, Pacman, Flatpak, AppImage, Snap).
 - **Interests on first launch** (games, music, design, study, coding...) decide which shelves the Home page shows.
 - **The install command is always visible** and copyable, and it changes with the source you pick.
-- **Linked terminal.** A toggleable terminal (Ctrl+`) at the bottom runs every install and removal, with full colour
-  output and live progress, and answers prompts typed into it.
+- **Linked terminal.** A terminal at the bottom (toggle with Ctrl+`) runs every install and removal, with full colour
+  output and live progress, and answers prompts typed into it. Drag its top edge to resize it; the height is remembered.
+- **Theme changer.** 20 themes in *Settings → Appearance*, applied instantly: three calm Sunshine themes from the Sunshine OS
+  wallpapers (the default, *Sunshine Dusk*, is navy and soft gold) and 17 palettes from the Ingama Textil theme set.
+  *Build a theme from a wallpaper…* makes a palette from any image. Text contrast is checked so every theme stays readable.
 - Related versions (`-bin`, `-git`, ...) from the AUR on every product page.
 
 ![Search](screenshots/store-search.png)
 ![Product page](screenshots/store-detail.png)
 ![Terminal](screenshots/store-terminal.png)
+![Themes](screenshots/store-themes.png)
 
 ## Install
 Arch / AUR: `yay -S sunshine-store`  (the AUR package is updated at each release)

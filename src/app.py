@@ -15,35 +15,143 @@ import sys
 import termios
 import urllib.request
 
-from PyQt6.QtCore import QSize, Qt, QThread, QTimer, pyqtSignal, QProcess
+from PyQt6.QtCore import QRect, QSize, Qt, QThread, QTimer, pyqtSignal, QProcess
 from PyQt6.QtGui import (QColor, QFont, QGuiApplication, QIcon, QImageReader, QKeySequence, QLinearGradient, QPainter,
                          QPixmap, QRadialGradient, QPen, QShortcut, QTextCharFormat, QTextCursor)
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu,
-                             QPlainTextEdit, QPushButton, QScrollArea, QStackedWidget, QToolButton, QVBoxLayout, QWidget)
+                             QPlainTextEdit, QPushButton, QScrollArea, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+                             QFileDialog)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import backend as bk  # noqa: E402
 import index  # noqa: E402
 
-# ---- palette (from the liqueur-calculator page) -----------------------------------------------------------
-VOID, VOID2 = "#0a0705", "#120b0a"
-BURGUNDY, CHERRY, CHERRY_B = "#3d0f16", "#7a1128", "#a01a35"
-GOLD, GOLD_B, GOLD_DIM = "#c9a15a", "#e8c579", "#8a7040"
-PARCH, PARCH_DIM, MUTED = "#ece1cd", "#b8a996", "#8a7568"
-LINE = "rgba(201,161,90,0.22)"
-GREEN = "#7fae6a"
+# ---- theme engine --------------------------------------------------------------------------------------------
+import themes  # noqa: E402
+
 SERIF = '"Cormorant Garamond","Noto Serif","DejaVu Serif",Georgia,serif'
 SANS = '"Inter","Noto Sans","DejaVu Sans",sans-serif'
-
-# Frame colours by source (AUR blue, Pacman white, Flatpak gray; installed overrides with green).
-FRAME = {"aur": "#4c8dff", "pacman": "#ece1cd", "flatpak": "#8a869c", "appimage": "#b48cf2", "snap": "#e8913a"}
 SRC_NAME = {"aur": "AUR", "pacman": "Pacman", "flatpak": "Flatpak", "appimage": "AppImage", "snap": "Snap"}
 SRC_KIND = {"aur": "AUR package", "pacman": "Arch package", "flatpak": "Flatpak app", "appimage": "AppImage", "snap": "Snap"}
-
 ICON_CACHE = os.path.join(index.CACHE, "icons")
 JXL_OK = b"jxl" in [bytes(f).lower() for f in QImageReader.supportedImageFormats()]
 
-QSS = f"""
+
+def _rgb(h: str):
+    h = h.strip().lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def _hex(c) -> str:
+    return "#%02x%02x%02x" % tuple(max(0, min(255, int(round(v)))) for v in c)
+
+
+def mix(a: str, b: str, t: float) -> str:
+    """Blend colour a toward b by t (0..1)."""
+    ra, rb = _rgb(a), _rgb(b)
+    return _hex(tuple(ra[i] + (rb[i] - ra[i]) * t for i in range(3)))
+
+
+def rgba(c: str, alpha: float) -> str:
+    r, g, b = _rgb(c)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def lum(c: str) -> float:
+    def ch(v):
+        v /= 255
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    r, g, b = (ch(v) for v in _rgb(c))
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast(a: str, b: str) -> float:
+    la, lb = sorted((lum(a), lum(b)), reverse=True)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def qcolor(c: str, alpha: int = 255) -> QColor:
+    r, g, b = _rgb(c)
+    return QColor(r, g, b, alpha)
+
+
+# current palette (module globals, rewritten by apply_theme)
+THEME_ID = ""
+IS_DARK = True
+VOID = VOID2 = BURGUNDY = CHERRY = CHERRY_B = BTN_FG = GOLD = GOLD_B = GOLD_DIM = PARCH = PARCH_DIM = MUTED = ""
+LINE = OVERLAY = OVERLAY_H = SURFACE_RGBA = HOVER_RGBA = GREEN = DANGER = ""
+FRAME: dict = {}
+
+
+def apply_theme(t: dict) -> None:
+    """Derive every colour the UI uses from one palette (bg, surface, primary, secondary=text, accent), keeping text readable."""
+    global THEME_ID, IS_DARK, VOID, VOID2, BURGUNDY, CHERRY, CHERRY_B, BTN_FG, GOLD, GOLD_B, GOLD_DIM
+    global PARCH, PARCH_DIM, MUTED, LINE, OVERLAY, OVERLAY_H, SURFACE_RGBA, HOVER_RGBA, GREEN, DANGER, FRAME
+    bg = t["bg"]
+    dark = lum(bg) < 0.30
+    text = t["secondary"]
+    if contrast(text, bg) < 4.5:
+        text = "#f2ece0" if dark else "#241f1b"
+    surface = t["surface"]
+    brand = next((c for c in (t["primary"], t["accent"], text) if contrast(c, bg) >= 3.0), text)
+    accent = t["accent"] if contrast(t["accent"], bg) >= 1.8 else brand
+    THEME_ID, IS_DARK = t.get("id", "custom"), dark
+    VOID, VOID2 = bg, surface
+    GOLD = brand
+    GOLD_B = mix(brand, text, 0.30)
+    if contrast(GOLD_B, bg) < 3.5:
+        GOLD_B = text
+    GOLD_DIM = mix(brand, bg, 0.5)
+    PARCH, PARCH_DIM, MUTED = text, mix(text, bg, 0.30), mix(text, bg, 0.52)
+    BURGUNDY = mix(bg, accent, 0.20)
+    CHERRY, CHERRY_B = mix(surface, accent, 0.55), mix(surface, accent, 0.75)
+    BTN_FG = text if contrast(text, CHERRY) >= 4.5 else ("#ffffff" if lum(CHERRY) < 0.45 else "#1a1612")
+    LINE = rgba(brand, 0.30)
+    OVERLAY, OVERLAY_H = rgba(text, 0.06), rgba(text, 0.12)
+    SURFACE_RGBA = rgba(surface, 0.78 if dark else 0.90)
+    HOVER_RGBA = rgba(mix(surface, accent, 0.22), 0.90)
+    GREEN = "#7fb36b" if dark else "#3f8a34"
+    DANGER = "#e88a98" if dark else "#b3261e"
+    FRAME = {"aur": "#6b9de0" if dark else "#2f6fcf", "pacman": mix(text, bg, 0.22), "flatpak": mix(text, bg, 0.55),
+             "appimage": "#a78bd9" if dark else "#7a52c4", "snap": "#d9a05b" if dark else "#b56a12"}
+
+
+def theme_by_id(tid: str, custom: dict | None = None) -> dict:
+    if tid == "custom" and custom:
+        return custom
+    return next((t for t in themes.THEMES if t["id"] == tid), themes.THEMES[0])
+
+
+def palette_from_image(path: str) -> dict | None:
+    """Build a calm dark palette from a wallpaper: its darkest tones for the background, its warmest/brightest for the brand."""
+    from PyQt6.QtGui import QImage
+    img = QImage(path)
+    if img.isNull():
+        return None
+    img = img.scaled(96, 96, Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    px = [img.pixelColor(x, y) for y in range(96) for x in range(96)]
+    px.sort(key=lambda c: c.lightnessF())
+    def avg(cs):
+        n = max(1, len(cs))
+        return _hex((sum(c.red() for c in cs) / n, sum(c.green() for c in cs) / n, sum(c.blue() for c in cs) / n))
+    dark_end = avg(px[: len(px) // 3])
+    bg = mix(dark_end, "#000000", 0.25 if lum(dark_end) > 0.02 else 0)
+    bg = mix(bg, "#10131c", 0.35)
+    scored = sorted(px, key=lambda c: c.saturationF() * c.lightnessF() ** 0.6, reverse=True)
+    brand = avg(scored[: max(8, len(scored) // 40)])
+    for _ in range(4):                                # keep it readable on the dark background
+        if contrast(brand, bg) >= 4.0:
+            break
+        brand = mix(brand, "#ffffff", 0.18)
+    return {"id": "custom", "label": "From my wallpaper", "bg": bg, "surface": mix(bg, "#ffffff", 0.06), "surface_alt": mix(bg, "#ffffff", 0.10),
+            "panel": mix(bg, "#ffffff", 0.04), "primary": brand, "secondary": mix("#efe9dc", brand, 0.08),
+            "accent": mix(brand, bg, 0.30), "edge": rgba(brand, 0.2), "source": os.path.basename(path)}
+
+
+def build_qss() -> str:
+    return f"""
 * {{ font-family: {SANS}; }}
 QWidget {{ background: transparent; color: {PARCH}; font-size: 13px; }}
 QLabel {{ background: transparent; }}
@@ -53,45 +161,53 @@ QLabel#h2 {{ font-family: {SERIF}; font-weight: 600; font-size: 24px; color: {GO
 QLabel#h3 {{ font-family: {SERIF}; font-weight: 600; font-size: 17px; color: {PARCH}; }}
 QLabel#dim {{ color: {PARCH_DIM}; }}
 QLabel#muted {{ color: {MUTED}; }}
-QLineEdit#search {{ background: rgba(0,0,0,0.30); border: 1px solid {LINE}; border-radius: 3px; padding: 11px 14px; font-size: 14px; }}
+QLabel#logo {{ font-family: {SERIF}; font-style: italic; font-weight: 700; font-size: 24px; color: {GOLD_B}; padding: 4px 18px 0; }}
+QLabel#logosub {{ font-size: 9px; letter-spacing: 4px; color: {GOLD_DIM}; padding: 0 20px 18px; }}
+QLabel#legend {{ font-size: 10px; color: {MUTED}; padding: 10px 18px; }}
+QFrame#side {{ background: {OVERLAY}; border-right: 1px solid {LINE}; }}
+QLineEdit#search {{ background: {SURFACE_RGBA}; border: 1px solid {LINE}; border-radius: 3px; padding: 11px 14px; font-size: 14px; color: {PARCH}; }}
 QLineEdit#search:focus {{ border: 1px solid {GOLD}; }}
-QLineEdit#cmd {{ background: rgba(0,0,0,0.45); border: 1px solid {LINE}; border-radius: 3px; padding: 10px 12px;
-                 font-family: "JetBrains Mono","DejaVu Sans Mono",monospace; color: {GOLD_B}; selection-background-color: {CHERRY}; }}
-QPushButton {{ background: rgba(0,0,0,0.25); border: 1px solid {LINE}; border-radius: 3px; padding: 9px 16px; color: {PARCH_DIM}; }}
-QPushButton:hover {{ border-color: {GOLD_DIM}; background: rgba(0,0,0,0.4); }}
+QLineEdit#cmd {{ background: #14161c; border: 1px solid {LINE}; border-radius: 3px; padding: 10px 12px;
+                 font-family: "JetBrains Mono","DejaVu Sans Mono",monospace; color: #e8c98e; selection-background-color: {CHERRY}; }}
+QPushButton {{ background: {OVERLAY}; border: 1px solid {LINE}; border-radius: 3px; padding: 9px 16px; color: {PARCH_DIM}; }}
+QPushButton:hover {{ border-color: {GOLD_DIM}; background: {OVERLAY_H}; }}
 QPushButton#pill {{ border-radius: 3px; padding: 8px 16px; }}
-QPushButton#pill:checked {{ border-color: {GOLD}; color: {GOLD_B}; background: rgba(201,161,90,0.10); }}
+QPushButton#pill:checked {{ border-color: {GOLD}; color: {GOLD_B}; background: {rgba(GOLD, 0.12)}; }}
 QPushButton#nav {{ border: none; background: transparent; text-align: left; padding: 12px 16px; font-size: 14px; color: {PARCH_DIM}; }}
-QPushButton#nav:hover {{ color: {PARCH}; background: rgba(201,161,90,0.06); }}
-QPushButton#nav:checked {{ color: {GOLD_B}; background: rgba(201,161,90,0.10); border-left: 2px solid {GOLD}; }}
-QPushButton#get {{ background: {CHERRY}; border: 1px solid {GOLD}; color: {PARCH}; font-weight: 600; padding: 11px 30px;
+QPushButton#nav:hover {{ color: {PARCH}; background: {OVERLAY}; }}
+QPushButton#nav:checked {{ color: {GOLD_B}; background: {rgba(GOLD, 0.12)}; border-left: 2px solid {GOLD}; }}
+QPushButton#get {{ background: {CHERRY}; border: 1px solid {GOLD}; color: {BTN_FG}; font-weight: 600; padding: 11px 30px;
                    border-top-right-radius: 0; border-bottom-right-radius: 0; font-size: 14px; }}
 QPushButton#get:hover {{ background: {CHERRY_B}; }}
-QToolButton#getarrow {{ background: {CHERRY}; border: 1px solid {GOLD}; border-left: 1px solid {GOLD_DIM}; color: {PARCH};
+QToolButton#getarrow {{ background: {CHERRY}; border: 1px solid {GOLD}; border-left: 1px solid {GOLD_DIM}; color: {BTN_FG};
                         padding: 11px 9px; border-top-left-radius: 0; border-bottom-left-radius: 0; border-top-right-radius: 3px; border-bottom-right-radius: 3px; }}
 QToolButton#getarrow::menu-indicator {{ image: none; }}
 QToolButton#getarrow:hover {{ background: {CHERRY_B}; }}
-QPushButton#danger {{ border-color: {CHERRY_B}; color: #e88a98; }}
+QPushButton#danger {{ border-color: {DANGER}; color: {DANGER}; }}
 QPushButton#choice {{ text-align: left; padding: 16px 14px; font-size: 14px; border-radius: 2px; }}
-QPushButton#choice:checked {{ border: 1px solid {GOLD}; color: {GOLD_B};
-    background: qlineargradient(x1:0,y1:0,x2:1,y2:1, stop:0 rgba(122,17,40,0.45), stop:1 rgba(0,0,0,0.35)); }}
-QPushButton#primary {{ background: {CHERRY}; border: 1px solid {GOLD}; color: {PARCH}; font-weight: 600; padding: 12px 34px; }}
+QPushButton#choice:checked {{ border: 1px solid {GOLD}; color: {GOLD_B}; background: {rgba(mix(VOID2, GOLD, 0.2), 0.9)}; }}
+QPushButton#primary {{ background: {CHERRY}; border: 1px solid {GOLD}; color: {BTN_FG}; font-weight: 600; padding: 12px 34px; }}
 QPushButton#primary:hover {{ background: {CHERRY_B}; }}
 QScrollArea {{ border: none; background: transparent; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; }}
-QScrollBar::handle:vertical {{ background: rgba(201,161,90,0.25); border-radius: 4px; min-height: 30px; }}
+QScrollBar::handle:vertical {{ background: {rgba(GOLD, 0.30)}; border-radius: 4px; min-height: 30px; }}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
-QPlainTextEdit {{ background: rgba(0,0,0,0.45); border: 1px solid {LINE}; border-radius: 3px; font-family: "JetBrains Mono","DejaVu Sans Mono",monospace; }}
-QMenu {{ background: {VOID2}; border: 1px solid {LINE}; padding: 6px; }}
+QPlainTextEdit {{ background: #14161c; color: #d8d8d2; border: 1px solid {LINE}; border-radius: 3px; font-family: "JetBrains Mono","DejaVu Sans Mono",monospace; }}
+QMenu {{ background: {VOID2}; color: {PARCH}; border: 1px solid {LINE}; padding: 6px; }}
 QMenu::item {{ padding: 8px 22px; }}
 QMenu::item:selected {{ background: {BURGUNDY}; color: {GOLD_B}; }}
-QComboBox {{ background: rgba(0,0,0,0.3); border: 1px solid {LINE}; padding: 9px 12px; border-radius: 3px; }}
-QComboBox QAbstractItemView {{ background: {VOID2}; border: 1px solid {LINE}; selection-background-color: {BURGUNDY}; }}
+QComboBox {{ background: {OVERLAY}; border: 1px solid {LINE}; padding: 9px 12px; border-radius: 3px; color: {PARCH}; }}
+QComboBox QAbstractItemView {{ background: {VOID2}; color: {PARCH}; border: 1px solid {LINE}; selection-background-color: {BURGUNDY}; }}
 QCheckBox {{ spacing: 10px; }}
-QCheckBox::indicator {{ width: 19px; height: 19px; border: 1px solid {GOLD_DIM}; background: rgba(0,0,0,0.3); }}
+QCheckBox::indicator {{ width: 19px; height: 19px; border: 1px solid {GOLD_DIM}; background: {OVERLAY}; }}
 QCheckBox::indicator:checked {{ background: {CHERRY}; border-color: {GOLD}; }}
+QSplitter::handle:vertical {{ background: {rgba(GOLD, 0.16)}; height: 7px; }}
+QSplitter::handle:vertical:hover {{ background: {rgba(GOLD, 0.55)}; }}
 """
+
+
+apply_theme(theme_by_id(themes.DEFAULT_THEME))
 
 
 # ---------------------------------------------------------------------------------------------- helpers
@@ -134,12 +250,12 @@ def letter_pixmap(text: str, color: str, size: int) -> QPixmap:
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     g = QLinearGradient(0, 0, size, size)
-    g.setColorAt(0, QColor(CHERRY))
-    g.setColorAt(1, QColor(BURGUNDY))
+    g.setColorAt(0, qcolor(CHERRY))
+    g.setColorAt(1, qcolor(BURGUNDY))
     p.setBrush(g)
-    p.setPen(QPen(QColor(GOLD_DIM), 1))
+    p.setPen(QPen(qcolor(GOLD_DIM), 1))
     p.drawRoundedRect(1, 1, size - 2, size - 2, 6, 6)
-    p.setPen(QColor(GOLD_B))
+    p.setPen(qcolor(GOLD_B))
     f = QFont("Noto Serif", int(size * 0.40))
     f.setItalic(True)
     f.setBold(True)
@@ -224,13 +340,13 @@ class Panel(QFrame):
 
     def paintEvent(self, e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(28, 15, 15, 150 if not self.strong else 200))
-        p.setPen(QPen(QColor(201, 161, 90, 56), 1))
+        p.fillRect(self.rect(), qcolor(VOID2, (215 if self.strong else 185) if IS_DARK else 235))
+        p.setPen(QPen(qcolor(GOLD, 70), 1))
         p.drawRect(0, 0, self.width() - 1, self.height() - 1)
         g = QLinearGradient(0, 0, self.width(), 0)
-        g.setColorAt(0, QColor(201, 161, 90, 0))
-        g.setColorAt(0.5, QColor(201, 161, 90, 140))
-        g.setColorAt(1, QColor(201, 161, 90, 0))
+        g.setColorAt(0, qcolor(GOLD, 0))
+        g.setColorAt(0.5, qcolor(GOLD, 150))
+        g.setColorAt(1, qcolor(GOLD, 0))
         p.fillRect(0, 0, self.width(), 1, g)
 
 
@@ -262,8 +378,8 @@ class Card(QFrame):
         pkg = app.pick(order)
         col = frame_color(app, pkg)
         self.setObjectName("card")
-        self.setStyleSheet(f"QFrame#card {{ border: 1px solid {col}; border-radius: 3px; background: rgba(28,15,15,150); }}"
-                           f"QFrame#card:hover {{ background: rgba(61,15,22,150); }} QLabel {{ background: transparent; border: none; }}")
+        self.setStyleSheet(f"QFrame#card {{ border: 1px solid {col}; border-radius: 3px; background: {SURFACE_RGBA}; }}"
+                           f"QFrame#card:hover {{ background: {HOVER_RGBA}; }} QLabel {{ background: transparent; border: none; }}")
         self.setFixedHeight(124)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
@@ -327,6 +443,7 @@ class CardFlow(QWidget):
             c.setGeometry(col * (cw + self.GAP), r * (ch + self.GAP), cw, ch)
         rows = (len(self.cards) + cols - 1) // cols
         self.setMinimumHeight(rows * (ch + self.GAP) - self.GAP)
+        self.updateGeometry()
 
 
 class Row(QFrame):
@@ -340,7 +457,7 @@ class Row(QFrame):
         col = frame_color(app, pkg)
         self.setObjectName("row")
         self.setStyleSheet(f"QFrame#row {{ border-left: 3px solid {col}; border-bottom: 1px solid {LINE}; background: transparent; }}"
-                           f"QFrame#row:hover {{ background: rgba(61,15,22,110); }} QLabel {{ background: transparent; border: none; }}")
+                           f"QFrame#row:hover {{ background: {HOVER_RGBA}; }} QLabel {{ background: transparent; border: none; }}")
         self.setFixedHeight(86)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         lay = QHBoxLayout(self)
@@ -479,7 +596,7 @@ class TerminalPanel(Panel):
 
     def __init__(self):
         super().__init__(strong=True)
-        self.setFixedHeight(330)
+        self.setMinimumHeight(150)
         self.reader = None
         self._cb = None
         self._fmt = QTextCharFormat()
@@ -513,12 +630,12 @@ class TerminalPanel(Panel):
         self.input.setPlaceholderText("Type here to answer a prompt, or run any command…")
         self.input.returnPressed.connect(self.submit)
         v.addWidget(self.input)
-        self.say("Sunshine Store terminal. Installs and removals show up here.\n", GOLD_DIM)
+        self.say("Sunshine Store terminal. Installs and removals show up here.\n", "#8a8f99")
 
     # ---- output
     def _reset_fmt(self):
         self._fmt = QTextCharFormat()
-        self._fmt.setForeground(QColor("#d8cdb8"))
+        self._fmt.setForeground(QColor("#d8d8d2"))
 
     def say(self, text: str, color: str = ""):
         old = QTextCharFormat(self._fmt)
@@ -588,7 +705,7 @@ class TerminalPanel(Panel):
             elif c in ANSI_COLORS:
                 self._fmt.setForeground(QColor(ANSI_COLORS[c]))
             elif c == 39:
-                self._fmt.setForeground(QColor("#d8cdb8"))
+                self._fmt.setForeground(QColor("#d8d8d2"))
             elif c in (38, 48) and i + 2 < len(codes) and codes[i + 1] == 5:
                 if c == 38:
                     n = codes[i + 2]
@@ -618,7 +735,7 @@ class TerminalPanel(Panel):
             return False
         self._cb = on_finished
         self.title.setText(title)
-        self.say("\n$ " + " ".join(argv) + "\n", GOLD_B)
+        self.say("\n$ " + " ".join(argv) + "\n", "#e8c98e")
         try:
             self.reader = PtyReader(argv)
         except OSError as e:
@@ -634,7 +751,7 @@ class TerminalPanel(Panel):
     def _ended(self, code: int):
         r, self.reader = self.reader, None
         self.stop_btn.setEnabled(False)
-        self.say(("\n✔ Finished" if code == 0 else f"\n✘ Stopped with exit code {code}") + "\n", GREEN if code == 0 else "#e06c75")
+        self.say(("\n✔ Finished" if code == 0 else f"\n✘ Stopped with exit code {code}") + "\n", "#7fb36b" if code == 0 else "#e06c75")
         if r:
             r.deleteLater()
         cb, self._cb = self._cb, None
@@ -656,6 +773,49 @@ class TerminalPanel(Panel):
         if self.reader:
             self.say("\n^C\n", "#e5c07b")
             self.reader.stop()
+
+
+class Swatch(QPushButton):
+    """A clickable mini-preview of one theme."""
+
+    def __init__(self, t: dict):
+        super().__init__()
+        self.t = t
+        self.setFixedSize(156, 86)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(f"{t['label']}  ·  {t.get('source', '')}")
+
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        t = self.t
+        r = self.rect().adjusted(1, 1, -1, -1)
+        p.fillRect(r, qcolor(t["bg"]))
+        card = QRect(8, 8, r.width() - 14, 38)
+        p.fillRect(card, qcolor(t["surface"]))
+        txt = t["secondary"] if contrast(t["secondary"], t["bg"]) >= 4.5 else ("#f2ece0" if lum(t["bg"]) < 0.3 else "#241f1b")
+        brand = next((c for c in (t["primary"], t["accent"], txt) if contrast(c, t["bg"]) >= 3.0), txt)
+        for i, col in enumerate((brand, t["accent"], txt)):
+            p.setBrush(qcolor(col))
+            p.setPen(QPen(qcolor(txt, 60), 1))
+            p.drawEllipse(card.x() + 8 + i * 22, card.y() + 9, 18, 18)
+        f = p.font()
+        f.setPointSize(9)
+        p.setFont(f)
+        p.setPen(qcolor(txt))
+        p.drawText(QRect(8, 52, r.width() - 14, 26), Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                   p.fontMetrics().elidedText(t["label"], Qt.TextElideMode.ElideRight, r.width() - 14))
+        selected = t.get("id") == THEME_ID
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(qcolor(GOLD) if selected else qcolor(brand, 70), 2 if selected else 1))
+        p.drawRect(r)
+        if selected:
+            p.setPen(qcolor(brand))
+            p.drawText(QRect(r.width() - 26, 50, 22, 24), Qt.AlignmentFlag.AlignCenter, "✔")
+
+
+class SwatchFlow(CardFlow):
+    GAP, MIN_W = 12, 156
 
 
 class Onboarding(QWidget):
@@ -745,10 +905,10 @@ class Hero(Panel):
     def paintEvent(self, e):
         p = QPainter(self)
         g = QLinearGradient(0, 0, self.width(), self.height())
-        g.setColorAt(0, QColor(122, 17, 40, 190))
-        g.setColorAt(1, QColor(18, 11, 10, 230))
+        g.setColorAt(0, qcolor(mix(VOID2, GOLD, 0.30), 230))
+        g.setColorAt(1, qcolor(VOID, 235))
         p.fillRect(self.rect(), g)
-        p.setPen(QPen(QColor(201, 161, 90, 90), 1))
+        p.setPen(QPen(qcolor(GOLD, 100), 1))
         p.drawRect(0, 0, self.width() - 1, self.height() - 1)
 
     def mousePressEvent(self, e):
@@ -865,7 +1025,7 @@ class Detail(QWidget):
             pb.setCheckable(True)
             pb.setChecked(s == p.source)
             col = GREEN if app.items[s].installed else FRAME[s]
-            pb.setStyleSheet(f"QPushButton#pill {{ border-color: {col}; }} QPushButton#pill:checked {{ background: rgba(255,255,255,0.07); color: {col}; border-width: 2px; }}")
+            pb.setStyleSheet(f"QPushButton#pill {{ border-color: {col}; }} QPushButton#pill:checked {{ background: {OVERLAY_H}; color: {col}; border-width: 2px; }}")
             pb.clicked.connect(lambda _, s=s: self.show_app(app, app.items[s]))
             self.pills.addWidget(pb)
         self.pills.addStretch(1)
@@ -964,15 +1124,37 @@ class Detail(QWidget):
         self.body.end()
 
 
-class Settings(QWidget):
+class Settings(QScrollArea):
     def __init__(self, store):
         super().__init__()
         self.store = store
-        outer = QVBoxLayout(self)
+        self.setWidgetResizable(True)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        inner = QWidget()
+        self.setWidget(inner)
+        outer = QVBoxLayout(inner)
         outer.setContentsMargins(32, 8, 32, 24)
         outer.setSpacing(14)
         outer.addWidget(lbl("PREFERENCES", "step"))
         outer.addWidget(lbl("Settings", "h2"))
+
+        pa = Panel()
+        v = QVBoxLayout(pa)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.addWidget(lbl("Appearance", "h3"))
+        v.addWidget(lbl("Pick a look; it applies right away. The Sunshine themes come from your wallpapers, the others are palettes from the Ingama Textil theme set.", "dim", wrap=True))
+        flow = SwatchFlow()
+        custom = store.cfg.get("custom_theme")
+        for t in ([custom] if custom else []) + themes.THEMES:
+            sw = Swatch(t)
+            sw.clicked.connect(lambda _, t=t: store.set_theme(t["id"], t if t.get("id") == "custom" else None))
+            flow.add(sw)
+        v.addWidget(flow)
+        wp = QPushButton("🖼  Build a theme from a wallpaper…")
+        wp.setFixedWidth(300)
+        wp.clicked.connect(store.theme_from_wallpaper)
+        v.addWidget(wp, 0, Qt.AlignmentFlag.AlignLeft)
+        outer.addWidget(pa)
 
         p1 = Panel()
         v = QVBoxLayout(p1)
@@ -1067,13 +1249,11 @@ class Store(QWidget):
         root.setSpacing(0)
         side = QFrame()
         side.setFixedWidth(210)
-        side.setStyleSheet("QFrame { background: rgba(0,0,0,0.35); border-right: 1px solid rgba(201,161,90,0.18); }")
+        side.setObjectName("side")
         sl = QVBoxLayout(side)
         sl.setContentsMargins(0, 18, 0, 14)
-        logo = lbl("☀  Sunshine")
-        logo.setStyleSheet(f"font-family: {SERIF}; font-style: italic; font-weight: 700; font-size: 24px; color: {GOLD_B}; padding: 4px 18px 0; border: none;")
-        sub = lbl("S T O R E")
-        sub.setStyleSheet(f"font-size: 9px; letter-spacing: 4px; color: {GOLD_DIM}; padding: 0 20px 18px; border: none;")
+        logo = lbl("☀  Sunshine", "logo")
+        sub = lbl("S T O R E", "logosub")
         sl.addWidget(logo)
         sl.addWidget(sub)
         self.nav = {}
@@ -1085,11 +1265,9 @@ class Store(QWidget):
             sl.addWidget(b)
             self.nav[key] = b
         sl.addStretch(1)
-        leg = lbl("<span style='color:#4c8dff'>■</span> AUR &nbsp; <span style='color:#ece1cd'>■</span> Pacman<br>"
-                  "<span style='color:#8a869c'>■</span> Flatpak &nbsp; <span style='color:#b48cf2'>■</span> AppImage<br>"
-                  "<span style='color:#e8913a'>■</span> Snap &nbsp; <span style='color:#7fae6a'>■</span> Installed")
-        leg.setStyleSheet(f"font-size: 10px; color: {MUTED}; padding: 10px 18px; border: none;")
-        sl.addWidget(leg)
+        self.legend = lbl("", "legend")
+        self.fill_legend()
+        sl.addWidget(self.legend)
         root.addWidget(side)
 
         main = QVBoxLayout()
@@ -1126,10 +1304,17 @@ class Store(QWidget):
         self.detail.back.connect(self.go_back)
         for w in (self.onboarding, self.home, self.results, self.installed_page, self.updates_page, self.settings, self.detail):
             self.stack.addWidget(w)
-        main.addWidget(self.stack, 1)
+        self.split = QSplitter(Qt.Orientation.Vertical)
+        self.split.setChildrenCollapsible(False)
+        self.split.setHandleWidth(7)
+        self.split.addWidget(self.stack)
         self.term = TerminalPanel()
+        self.split.addWidget(self.term)
         self.term.hide()
-        main.addWidget(self.term)
+        self.split.setStretchFactor(0, 1)
+        self.split.setStretchFactor(1, 0)
+        self.split.splitterMoved.connect(self._term_moved)
+        main.addWidget(self.split, 1)
         bar = QHBoxLayout()
         bar.setContentsMargins(32, 4, 32, 8)
         self.term_btn = QPushButton("⌨  Terminal")
@@ -1161,22 +1346,84 @@ class Store(QWidget):
     # ---- painting
     def paintEvent(self, e):
         p = QPainter(self)
-        p.fillRect(self.rect(), QColor(VOID))
+        p.fillRect(self.rect(), qcolor(VOID))
         w, h = self.width(), self.height()
         g = QRadialGradient(w * 0.15, -h * 0.05, max(w, h) * 0.7)
-        g.setColorAt(0, QColor(122, 17, 40, 70))
-        g.setColorAt(1, QColor(122, 17, 40, 0))
+        glow = BURGUNDY if IS_DARK else mix(VOID, GOLD, 0.15)
+        g.setColorAt(0, qcolor(glow, 90 if IS_DARK else 70))
+        g.setColorAt(1, qcolor(glow, 0))
         p.fillRect(self.rect(), g)
         g2 = QRadialGradient(w, h * 0.2, max(w, h) * 0.5)
-        g2.setColorAt(0, QColor(201, 161, 90, 22))
-        g2.setColorAt(1, QColor(201, 161, 90, 0))
+        g2.setColorAt(0, qcolor(GOLD, 26))
+        g2.setColorAt(1, qcolor(GOLD, 0))
         p.fillRect(self.rect(), g2)
 
     # ---- helpers
     def set_terminal(self, on):
-        self.term.setVisible(on)
         if on:
+            self.term.show()
+            total = max(self.split.height(), 600)
+            h = max(150, min(int(self.cfg.get("term_height", 300)), total - 220))
+            self.split.setSizes([total - h - 7, h])
             self.term.input.setFocus()
+        else:
+            self._term_moved()
+            self.term.hide()
+            bk.save_config(self.cfg)
+
+    def _term_moved(self, *_):
+        if self.term.isVisible() and len(self.split.sizes()) > 1 and self.split.sizes()[1] > 0:
+            self.cfg["term_height"] = self.split.sizes()[1]
+
+    def closeEvent(self, e):
+        self._term_moved()
+        bk.save_config(self.cfg)
+        super().closeEvent(e)
+
+    def fill_legend(self):
+        c = FRAME
+        self.legend.setText(f"<span style='color:{c['aur']}'>■</span> AUR &nbsp; <span style='color:{c['pacman']}'>■</span> Pacman<br>"
+                            f"<span style='color:{c['flatpak']}'>■</span> Flatpak &nbsp; <span style='color:{c['appimage']}'>■</span> AppImage<br>"
+                            f"<span style='color:{c['snap']}'>■</span> Snap &nbsp; <span style='color:{GREEN}'>■</span> Installed")
+
+    def set_theme(self, tid, custom=None):
+        t = theme_by_id(tid, custom or self.cfg.get("custom_theme"))
+        apply_theme(t)
+        QApplication.instance().setStyleSheet(build_qss())
+        self.cfg["theme"] = tid
+        if custom:
+            self.cfg["custom_theme"] = custom
+        bk.save_config(self.cfg)
+        self.fill_legend()
+        cur = self.stack.currentWidget()
+        if cur is self.home:
+            self.build_home()
+        elif cur is self.installed_page:
+            self.build_installed()
+        elif cur is self.results and self._results:
+            self.render_results(self._query)
+        elif cur is self.detail and self.detail.app:
+            self.detail.show_app(self.detail.app, self.detail.pkg)
+        idx, was = self.stack.indexOf(self.settings), cur is self.settings
+        self.stack.removeWidget(self.settings)
+        self.settings.deleteLater()
+        self.settings = Settings(self)
+        self.stack.insertWidget(idx, self.settings)
+        if was:
+            self.stack.setCurrentWidget(self.settings)
+        self.update()
+        self.toast("Theme: " + t.get("label", tid))
+
+    def theme_from_wallpaper(self):
+        start = os.path.expanduser("~/Pictures/wallpapers")
+        path, _ = QFileDialog.getOpenFileName(self, "Pick a wallpaper", start if os.path.isdir(start) else os.path.expanduser("~"),
+                                              "Images (*.png *.jpg *.jpeg *.webp *.bmp)")
+        if path:
+            pal = palette_from_image(path)
+            if pal:
+                self.set_theme("custom", pal)
+            else:
+                self.toast("Could not read that image.")
 
     def toast(self, text):
         self.status.setText(text)
@@ -1203,7 +1450,7 @@ class Store(QWidget):
         self.settings.refresh_btn.setEnabled(False)
         def prog(m):
             self.settings.refresh_msg.setText(m)
-            self.term.say("catalog: " + m + "\n", GOLD_DIM)
+            self.term.say("catalog: " + m + "\n", "#8a8f99")
             if first:
                 self.toast(m)
         def done(res):
@@ -1415,7 +1662,11 @@ class Store(QWidget):
 
 def main():
     app = QApplication(sys.argv)
-    app.setStyleSheet(QSS)
+    app.setDesktopFileName("sunshine-store")
+    cfg0 = bk.load_config()
+    tid = sys.argv[sys.argv.index("--theme") + 1] if "--theme" in sys.argv else cfg0.get("theme", themes.DEFAULT_THEME)
+    apply_theme(theme_by_id(tid, cfg0.get("custom_theme")))
+    app.setStyleSheet(build_qss())
     app.setFont(QFont("Inter", 10))
     w = Store()
     if "--size" in sys.argv:
