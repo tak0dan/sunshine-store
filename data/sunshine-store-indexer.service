@@ -1,0 +1,9 @@
+[Unit]
+Description=Sunshine Store catalog refresh (checks the 5 h active / 36 h total policy)
+ConditionACPower=true
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /usr/lib/sunshine-store/index.py --tick
+Nice=19
+IOSchedulingClass=idle

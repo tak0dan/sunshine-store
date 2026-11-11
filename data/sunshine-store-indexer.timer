@@ -1,0 +1,10 @@
+[Unit]
+Description=Sunshine Store catalog: tick every 30 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=30min
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target
