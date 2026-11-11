@@ -13,12 +13,13 @@ from dataclasses import dataclass, field
 
 import appimage
 import index
+import windows
 
-SOURCES = ("aur", "pacman", "flatpak", "appimage", "snap")
+SOURCES = ("aur", "pacman", "flatpak", "appimage", "snap", "wine")
 ORDERS = {
-    "aur-first": ("aur", "pacman", "flatpak", "appimage", "snap"),
-    "arch-first": ("pacman", "aur", "flatpak", "appimage", "snap"),
-    "pacman-flatpak": ("pacman", "flatpak", "appimage", "aur", "snap"),
+    "aur-first": ("aur", "pacman", "flatpak", "appimage", "snap", "wine"),
+    "arch-first": ("pacman", "aur", "flatpak", "appimage", "snap", "wine"),
+    "pacman-flatpak": ("pacman", "flatpak", "appimage", "aur", "snap", "wine"),
 }
 ORDER_LABELS = {
     "aur-first": "AUR → Pacman → Flatpak → AppImage → Snap",
@@ -201,9 +202,23 @@ def installed_snap() -> set:
     return v
 
 
+def windows_pkgs(fresh: bool = False) -> list:
+    """Installed Windows apps/games (Wine, Proton, Steam launchers) as Pkg objects, cached briefly."""
+    t, v = _cache.get("win", (0, []))
+    if fresh or time.time() - t > 15:
+        v = []
+        for e in windows.entries():
+            kind = {"wine": "Wine", "proton": "Proton", "steam": "Steam"}[e["kind"]]
+            v.append(Pkg(name=e["name"], source="wine", title=e["name"], desc=e["comment"] or f"Windows app, runs with {kind}", installed=True,
+                         app_id=e["path"], repo=kind, icon=e["icon"], version="", cats="Wine"))
+        _cache["win"] = (time.time(), v)
+    return v
+
+
 def refresh_installed():
     installed_pacman(True)
     installed_flatpak(True)
+    windows_pkgs(True)
 
 
 # ---------------------------------------------------------------- rows -> apps
@@ -288,6 +303,19 @@ def search_all(query: str, source: str | None = None) -> list:
                 a = by_key[k] = App(k)
                 apps.append(a)
             a.items.setdefault("snap", p)
+    ql = query.lower()
+    local = [p for p in windows_pkgs() if ql in p.name.lower()]
+    if source in (None, "wine") and local:
+        by_key = {a.key: a for a in apps}
+        front = []
+        for p in local:
+            k = index.normalize(p.name)
+            a = by_key.get(k)
+            if a is None:
+                a = App(k)
+                front.append(a)
+            a.items["wine"] = p
+        apps = front + apps
     return apps
 
 
@@ -372,10 +400,34 @@ def live_aur(name: str) -> dict:
 
 
 # ---------------------------------------------------------------- actions
+def run_command_for(p: Pkg) -> str:
+    """What to type in a terminal to start the app once installed."""
+    if p.source == "flatpak":
+        return f"flatpak run {p.app_id}"
+    if p.source == "snap":
+        return f"snap run {p.name}"
+    if p.source == "appimage":
+        e = appimage.load().get(p.app_id)
+        return f'"{e["path"]}"' if e else f"~/Applications/{p.label.replace(' ', '')}*.AppImage"
+    if p.source == "wine":
+        for e in windows.entries():
+            if e["path"] == p.app_id:
+                return windows.run_command(e)
+        return "wine start /unix <program.exe>"
+    if p.installed:
+        for line in _run(["pacman", "-Ql", p.name]).splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1].startswith("/usr/bin/") and not parts[1].endswith("/"):
+                return os.path.basename(parts[1])
+    return p.name
+
+
 _APPIMAGE_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "appimage.py")
 
 
 def command_for(p: Pkg, remove: bool = False) -> str:
+    if p.source == "wine":
+        return f'sunshine-store-windows remove "{p.app_id}"' if remove else run_command_for(p)
     if p.source == "appimage":
         return f"sunshine-store-appimage {'remove' if remove else 'install'} {p.app_id}"
     if p.source == "snap":
@@ -389,6 +441,9 @@ def command_for(p: Pkg, remove: bool = False) -> str:
 
 def argv_for(p: Pkg, remove: bool = False) -> list:
     """Non-interactive argv the GUI runs (polkit prompts for privileges)."""
+    if p.source == "wine":
+        import sys
+        return [sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "windows.py"), "remove", p.app_id]
     if p.source == "appimage":
         import sys
         if remove:
@@ -404,6 +459,35 @@ def argv_for(p: Pkg, remove: bool = False) -> list:
     if remove:
         return ["flatpak", "uninstall", "-y", "--noninteractive", p.app_id]
     return ["flatpak", "install", "-y", "--noninteractive", "flathub", p.app_id]
+
+
+# ---------------------------------------------------------------- updates
+UPDATE_SCRIPT = r"""
+echo "== System packages (pacman) =="
+pkexec pacman -Syu --noconfirm || echo "The system update did not finish."
+if command -v yay >/dev/null 2>&1; then echo; echo "== AUR packages (yay) =="; yay -Sua --noconfirm --sudo pkexec; fi
+if command -v flatpak >/dev/null 2>&1; then echo; echo "== Flatpak apps =="; flatpak update -y --noninteractive; fi
+echo
+echo "All updates finished."
+"""
+
+
+def full_update_argv() -> list:
+    return ["bash", "-c", UPDATE_SCRIPT]
+
+
+def list_updates() -> dict:
+    """What can be updated right now: {'pacman': [...], 'aur': [...], 'flatpak': [...]} (lines of 'name old -> new')."""
+    out = {"pacman": [], "aur": [], "flatpak": []}
+    if shutil.which("checkupdates"):
+        out["pacman"] = [l for l in _run(["checkupdates"], 90).splitlines() if l.strip()]
+    else:
+        out["pacman"] = [l for l in _run(["pacman", "-Qu"], 30).splitlines() if l.strip()]
+    if shutil.which("yay"):
+        out["aur"] = [l for l in _run(["yay", "-Qua"], 90).splitlines() if l.strip()]
+    if shutil.which("flatpak"):
+        out["flatpak"] = [l.replace("\t", "  ") for l in _run(["flatpak", "remote-ls", "--updates", "--columns=application,version"], 90).splitlines() if l.strip()]
+    return out
 
 
 # ---------------------------------------------------------------- installed list
@@ -459,6 +543,8 @@ def list_installed(apps_only: bool = True) -> list:
         pkgs.append(Pkg(name=n, source="aur" if n in foreign else "pacman", installed=True, version=ver, desc=desc, icon=icons.get(n, "")))
     for fid in sorted(installed_flatpak(True)):
         pkgs.append(Pkg(name=fid.rsplit(".", 1)[-1], source="flatpak", app_id=fid, repo="flathub", installed=True, icon=fid))
+    for p in windows_pkgs(True):
+        pkgs.append(p)
     for repo, e in appimage.load().items():
         pkgs.append(Pkg(name=e.get("name", repo), title=e.get("name", repo), source="appimage", app_id=repo, repo="appimage.github.io",
                         version=e.get("version", ""), installed=True, icon=e.get("icon", "")))

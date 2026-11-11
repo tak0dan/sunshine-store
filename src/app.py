@@ -25,14 +25,15 @@ from PyQt6.QtWidgets import (QApplication, QCheckBox, QComboBox, QFrame, QHBoxLa
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import backend as bk  # noqa: E402
 import index  # noqa: E402
+import windows  # noqa: E402
 
 # ---- theme engine --------------------------------------------------------------------------------------------
 import themes  # noqa: E402
 
 SERIF = '"Cormorant Garamond","Noto Serif","DejaVu Serif",Georgia,serif'
 SANS = '"Inter","Noto Sans","DejaVu Sans",sans-serif'
-SRC_NAME = {"aur": "AUR", "pacman": "Pacman", "flatpak": "Flatpak", "appimage": "AppImage", "snap": "Snap"}
-SRC_KIND = {"aur": "AUR package", "pacman": "Arch package", "flatpak": "Flatpak app", "appimage": "AppImage", "snap": "Snap"}
+SRC_NAME = {"aur": "AUR", "pacman": "Pacman", "flatpak": "Flatpak", "appimage": "AppImage", "snap": "Snap", "wine": "Wine / Proton"}
+SRC_KIND = {"aur": "AUR package", "pacman": "Arch package", "flatpak": "Flatpak app", "appimage": "AppImage", "snap": "Snap", "wine": "Windows app"}
 ICON_CACHE = os.path.join(index.CACHE, "icons")
 JXL_OK = b"jxl" in [bytes(f).lower() for f in QImageReader.supportedImageFormats()]
 
@@ -115,7 +116,8 @@ def apply_theme(t: dict) -> None:
     GREEN = "#7fb36b" if dark else "#3f8a34"
     DANGER = "#e88a98" if dark else "#b3261e"
     FRAME = {"aur": "#6b9de0" if dark else "#2f6fcf", "pacman": mix(text, bg, 0.22), "flatpak": mix(text, bg, 0.55),
-             "appimage": "#a78bd9" if dark else "#7a52c4", "snap": "#d9a05b" if dark else "#b56a12"}
+             "appimage": "#a78bd9" if dark else "#7a52c4", "snap": "#d9a05b" if dark else "#b56a12",
+             "wine": "#d9858f" if dark else "#b3404f"}
 
 
 def theme_by_id(tid: str, custom: dict | None = None) -> dict:
@@ -202,6 +204,14 @@ QComboBox QAbstractItemView {{ background: {VOID2}; color: {PARCH}; border: 1px 
 QCheckBox {{ spacing: 10px; }}
 QCheckBox::indicator {{ width: 19px; height: 19px; border: 1px solid {GOLD_DIM}; background: {OVERLAY}; }}
 QCheckBox::indicator:checked {{ background: {CHERRY}; border-color: {GOLD}; }}
+QPushButton#update {{ background: {CHERRY}; border: 1px solid {GOLD}; color: {BTN_FG}; font-weight: 600; padding: 10px 18px; }}
+QPushButton#update:hover {{ background: {CHERRY_B}; }}
+QFrame#popup {{ background: {VOID2}; border: 1px solid {LINE}; border-radius: 10px; }}
+QFrame#codebox {{ background: #14161c; border: none; border-radius: 6px; }}
+QFrame#codebox QLabel {{ color: #e8c98e; font-family: "JetBrains Mono","DejaVu Sans Mono",monospace; font-size: 12px; background: transparent; }}
+QToolButton#copy {{ background: transparent; border: none; color: #9aa0ab; font-size: 17px; padding: 2px 6px; }}
+QToolButton#copy:hover {{ color: #ffffff; }}
+QToolButton#getarrow {{ min-width: 18px; }}
 QSplitter::handle:vertical {{ background: {rgba(GOLD, 0.16)}; height: 7px; }}
 QSplitter::handle:vertical:hover {{ background: {rgba(GOLD, 0.55)}; }}
 """
@@ -915,6 +925,77 @@ class Hero(Panel):
         self.opened.emit(self.app)
 
 
+class CopyBox(QFrame):
+    """A code block with a copy icon, like the Flathub install box."""
+
+    def __init__(self, text: str, store):
+        super().__init__()
+        self.setObjectName("codebox")
+        self.text, self.store = text, store
+        h = QHBoxLayout(self)
+        h.setContentsMargins(14, 10, 8, 10)
+        l = QLabel(text)
+        l.setWordWrap(True)
+        l.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        h.addWidget(l, 1)
+        b = QToolButton()
+        b.setObjectName("copy")
+        b.setText("⧉")
+        b.setToolTip("Copy")
+        b.setCursor(Qt.CursorShape.PointingHandCursor)
+        b.clicked.connect(self.copy)
+        h.addWidget(b, 0, Qt.AlignmentFlag.AlignTop)
+
+    def copy(self):
+        QGuiApplication.clipboard().setText(self.text)
+        self.store.toast("Copied. Paste it into a terminal.")
+
+
+class CommandPopup(QFrame):
+    """Dropdown under the Install button: Manual install, Run, and the other places to get the app."""
+
+    def __init__(self, store, parent):
+        super().__init__(parent, Qt.WindowType.Popup)
+        self.setObjectName("popup")
+        self.setFixedWidth(440)
+        self.store = store
+
+    def build(self, app: bk.App, pkg: bk.Pkg, switch):
+        v = QVBoxLayout(self)
+        v.setContentsMargins(22, 18, 22, 20)
+        v.setSpacing(8)
+        if pkg.source == "wine":
+            v.addWidget(lbl("Run", "h3"))
+            v.addWidget(CopyBox(bk.run_command_for(pkg), self.store))
+            v.addWidget(lbl("Remove", "h3"))
+            v.addWidget(lbl("Takes the menu entry away. Use the Wine uninstaller from the Windows page to remove the program itself.", "dim", wrap=True))
+            v.addWidget(CopyBox(bk.command_for(pkg, True), self.store))
+        else:
+            v.addWidget(lbl("Manual Install", "h3"))
+            v.addWidget(lbl("Prefer the terminal? Run this instead of pressing Install.", "dim", wrap=True))
+            v.addWidget(CopyBox(bk.command_for(pkg), self.store))
+            v.addWidget(lbl("Run", "h3"))
+            v.addWidget(CopyBox(bk.run_command_for(pkg), self.store))
+            if pkg.installed:
+                v.addWidget(lbl("Remove", "h3"))
+                v.addWidget(CopyBox(bk.command_for(pkg, True), self.store))
+        others = [s for s in app.sources if s != pkg.source]
+        if others:
+            v.addSpacing(6)
+            v.addWidget(lbl("Get it from somewhere else", "h3"))
+            for s in others:
+                b = QPushButton(f"{SRC_NAME[s]}   ·   {app.items[s].name} {app.items[s].version}")
+                b.setObjectName("pill")
+                b.clicked.connect(lambda _, s=s: (self.close(), switch(app, app.items[s])))
+                v.addWidget(b)
+
+    def show_under(self, button: QWidget):
+        self.adjustSize()
+        g = button.mapToGlobal(button.rect().bottomRight())
+        self.move(g.x() - self.width() + 1, g.y() + 8)
+        self.show()
+
+
 class Detail(QWidget):
     back = pyqtSignal()
 
@@ -958,9 +1039,8 @@ class Detail(QWidget):
         self.arrow = QToolButton()
         self.arrow.setObjectName("getarrow")
         self.arrow.setText("▾")
-        self.arrow.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.menu = QMenu(self)
-        self.arrow.setMenu(self.menu)
+        self.arrow.setToolTip("Manual install, run command, other sources")
+        self.arrow.clicked.connect(self.open_popup)
         act.addWidget(self.btn)
         act.addWidget(self.arrow)
         act.addSpacing(12)
@@ -973,22 +1053,6 @@ class Detail(QWidget):
         hl.addLayout(c, 1)
         outer.addWidget(head)
 
-        cmdp = Panel()
-        cl = QVBoxLayout(cmdp)
-        cl.setContentsMargins(20, 14, 20, 14)
-        self.cmd_label = lbl("INSTALL COMMAND", "step")
-        cl.addWidget(self.cmd_label)
-        r = QHBoxLayout()
-        self.cmd = QLineEdit()
-        self.cmd.setObjectName("cmd")
-        self.cmd.setReadOnly(True)
-        copy = QPushButton("Copy")
-        copy.setObjectName("pill")
-        copy.clicked.connect(self.copy)
-        r.addWidget(self.cmd, 1)
-        r.addWidget(copy)
-        cl.addLayout(r)
-        outer.addWidget(cmdp)
 
         tabs = QHBoxLayout()
         self.tab_btns = []
@@ -1029,16 +1093,9 @@ class Detail(QWidget):
             pb.clicked.connect(lambda _, s=s: self.show_app(app, app.items[s]))
             self.pills.addWidget(pb)
         self.pills.addStretch(1)
-        self.btn.setText("Reinstall" if p.installed else "Get")
+        self.btn.setText("Open" if p.source == "wine" else ("Reinstall" if p.installed else "Get"))
+        self.rm.setText("Remove from menu" if p.source == "wine" else "Uninstall")
         self.rm.setVisible(p.installed)
-        self.menu.clear()
-        others = [s for s in app.sources if s != p.source]
-        if others:
-            sub = self.menu.addMenu("Install from another source")
-            for s in others:
-                sub.addAction(f"{SRC_NAME[s]}  ·  {app.items[s].name} {app.items[s].version}", lambda s=s: self.show_app(app, app.items[s]))
-        self.menu.addAction("Show the removal command", self.show_removal)
-        self.update_cmd()
         self.tab(0)
         if p.source == "aur":                        # catalog is a few hours old at most: freshen this one package
             spawn(bk.live_aur, p.name, on_done=lambda r, p=p: self.live(p, r))
@@ -1059,20 +1116,19 @@ class Detail(QWidget):
             setattr(p, k, v)
         self.fill_meta()
 
-    def update_cmd(self):
-        self.cmd_label.setText("REMOVAL COMMAND" if self._removal else "INSTALL COMMAND")
-        self.cmd.setText(bk.command_for(self.pkg, self._removal))
-
-    def show_removal(self):
-        self._removal = not self._removal
-        self.update_cmd()
-
-    def copy(self):
-        QGuiApplication.clipboard().setText(self.cmd.text())
-        self.store.toast("Command copied. Paste it into a terminal.")
+    def open_popup(self):
+        if not self.pkg:
+            return
+        pop = CommandPopup(self.store, self)
+        pop.build(self.app, self.pkg, self.show_app)
+        pop.show_under(self.arrow)
 
     def act(self):
-        self.store.run(self.pkg)
+        if self.pkg.source == "wine":
+            QProcess.startDetached("bash", ["-c", windows.run_command({"exec": next((e["exec"] for e in windows.entries() if e["path"] == self.pkg.app_id), "")})])
+            self.store.toast("Starting " + self.pkg.label + "…")
+        else:
+            self.store.run(self.pkg)
 
     def tab(self, i):
         self._idx = i
@@ -1122,6 +1178,153 @@ class Detail(QWidget):
             apps.append(a)
         self.body.cards(apps, self.store.order, lambda a: self.show_app(a, a.items["aur"]))
         self.body.end()
+
+
+class DropZone(QFrame):
+    dropped = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setFixedHeight(150)
+        self.setObjectName("drop")
+        self._style(False)
+        v = QVBoxLayout(self)
+        v.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon = lbl("⬇", "h1", align=Qt.AlignmentFlag.AlignCenter)
+        v.addWidget(icon)
+        v.addWidget(lbl("Drop a Windows installer or game here (.exe, .msi)", "h3", align=Qt.AlignmentFlag.AlignCenter))
+        v.addWidget(lbl("or", "muted", align=Qt.AlignmentFlag.AlignCenter))
+        b = QPushButton("Browse…")
+        b.setObjectName("pill")
+        b.setFixedWidth(140)
+        b.clicked.connect(self.browse)
+        v.addWidget(b, 0, Qt.AlignmentFlag.AlignCenter)
+
+    def _style(self, hot: bool):
+        col = GOLD if hot else GOLD_DIM
+        self.setStyleSheet(f"QFrame#drop {{ border: 2px dashed {col}; border-radius: 8px; background: {rgba(GOLD, 0.10 if hot else 0.04)}; }}"
+                           f"QFrame#drop QLabel {{ border: none; background: transparent; }}")
+
+    def browse(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a Windows program", os.path.expanduser("~/Downloads"),
+                                              "Windows programs (*.exe *.msi *.bat *.lnk);;All files (*)")
+        if path:
+            self.dropped.emit(path)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls() and any(u.toLocalFile().lower().endswith(windows.EXTS) for u in e.mimeData().urls()):
+            e.acceptProposedAction()
+            self._style(True)
+
+    def dragLeaveEvent(self, e):
+        self._style(False)
+
+    def dropEvent(self, e):
+        self._style(False)
+        for u in e.mimeData().urls():
+            p = u.toLocalFile()
+            if p.lower().endswith(windows.EXTS):
+                self.dropped.emit(p)
+                break
+
+
+class WindowsPage(Page):
+    """Install Windows apps and games with Wine or Proton; the ones already installed show up in the catalog too."""
+
+    def __init__(self, store):
+        super().__init__()
+        self.store = store
+        self.pending = None
+
+    def build(self):
+        st = self.store
+        self.clear()
+        self.heading("Windows apps & games", "Run Windows programs on Sunshine OS. Drop an installer below: it is run with Wine or Proton in the "
+                     "terminal at the bottom, and the menu entry is created for you afterwards.", "WINDOWS")
+        have = windows.runners()
+        if not have:
+            p = Panel()
+            v = QVBoxLayout(p)
+            v.setContentsMargins(22, 18, 22, 18)
+            v.addWidget(lbl("Wine is not installed yet", "h3"))
+            v.addWidget(lbl("Wine runs Windows programs. Install it from the store, then come back here.", "dim", wrap=True))
+            b = QPushButton("Find Wine in the store")
+            b.setObjectName("primary")
+            b.clicked.connect(lambda: (st.search.setText("wine"), st.do_search()))
+            v.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+            self.v.addWidget(p)
+        dz = DropZone()
+        dz.dropped.connect(self.ask)
+        self.v.addWidget(dz)
+        self.slot = QVBoxLayout()
+        self.v.addLayout(self.slot)
+
+        row = QHBoxLayout()
+        scan = QPushButton("Find Steam / Proton games")
+        scan.setObjectName("pill")
+        scan.setEnabled(windows.has_steam_shortcuts())
+        scan.setToolTip("Runs steam-shortcuts: makes menu entries for installed Steam and Proton games" if windows.has_steam_shortcuts()
+                        else "steam-shortcuts is not installed")
+        scan.clicked.connect(lambda: st.run_steam_shortcuts())
+        row.addWidget(scan)
+        watch = QCheckBox("Create menu entries automatically after each install")
+        watch.setEnabled(windows.has_steam_shortcuts())
+        watch.setChecked(windows.watch_enabled())
+        watch.toggled.connect(lambda on: st.term.run(["steam-shortcuts", "--install-watch" if on else "--remove-watch"], "Steam shortcuts watcher"))
+        row.addWidget(watch)
+        row.addStretch(1)
+        self.v.addLayout(row)
+
+        self.v.addSpacing(8)
+        self.v.addWidget(lbl("Installed Windows apps", "h2"))
+        apps = []
+        for p in bk.windows_pkgs(True):
+            a = bk.App(p.name)
+            a.items["wine"] = p
+            apps.append(a)
+        if apps:
+            self.cards(apps, st.order, st.open_app)
+        else:
+            self.v.addWidget(lbl("Nothing here yet. Apps installed with Wine or Proton, and Steam games, appear here and in search.", "muted", wrap=True))
+        self.end()
+
+    def ask(self, exe: str):
+        while self.slot.count():
+            it = self.slot.takeAt(0)
+            if it.widget():
+                it.widget().deleteLater()
+        p = Panel(strong=True)
+        v = QVBoxLayout(p)
+        v.setContentsMargins(22, 18, 22, 18)
+        v.addWidget(lbl("READY TO INSTALL", "step"))
+        v.addWidget(lbl(os.path.basename(exe), "h3"))
+        v.addWidget(lbl(exe, "muted", wrap=True))
+        row = QHBoxLayout()
+        row.addWidget(lbl("Run with", "dim"))
+        combo = QComboBox()
+        for r in windows.runners() or ["wine"]:
+            combo.addItem({"wine": "Wine", "proton": "Proton (umu-launcher)"}[r], r)
+        row.addWidget(combo)
+        row.addStretch(1)
+        v.addLayout(row)
+        v.addWidget(lbl("Each program gets its own Wine prefix, so one app can never break another.", "muted", wrap=True))
+        v.addWidget(CopyBox(" ".join(windows.install_argv(exe, combo.currentData() or "wine")), self.store))
+        btns = QHBoxLayout()
+        go = QPushButton("Install")
+        go.setObjectName("primary")
+        go.clicked.connect(lambda: (self.store.install_windows(exe, combo.currentData() or "wine"), p.deleteLater()))
+        add = QPushButton("Already installed: just add it to the menu")
+        add.setObjectName("pill")
+        add.clicked.connect(lambda: (self.store.install_windows(exe, combo.currentData() or "wine", add_only=True), p.deleteLater()))
+        no = QPushButton("Cancel")
+        no.clicked.connect(p.deleteLater)
+        btns.addWidget(go)
+        btns.addWidget(add)
+        btns.addStretch(1)
+        btns.addWidget(no)
+        v.addLayout(btns)
+        self.slot.addWidget(p)
 
 
 class Settings(QScrollArea):
@@ -1241,7 +1444,8 @@ class Store(QWidget):
         self.resize(1240, 800)
         self.cfg = bk.load_config()
         self.order = bk.ORDERS.get(self.cfg.get("order", "aur-first"), bk.DEFAULT_ORDER)
-        self.procs, self._results, self._filter, self._query = [], [], None, ""
+        self.procs, self._results, self._query = [], [], ""
+        self._src_on = {s for s in self.cfg.get("sources", list(bk.SOURCES)) if s in bk.SOURCES} or set(bk.SOURCES)
         self._building = False
 
         root = QHBoxLayout(self)
@@ -1257,7 +1461,7 @@ class Store(QWidget):
         sl.addWidget(logo)
         sl.addWidget(sub)
         self.nav = {}
-        for key, label in (("home", "⌂   Home"), ("installed", "✔   Installed"), ("updates", "⬆   Updates"), ("settings", "⚙   Settings")):
+        for key, label in (("home", "⌂   Home"), ("installed", "✔   Installed"), ("windows", "▣   Windows"), ("updates", "⬆   Updates"), ("settings", "⚙   Settings")):
             b = QPushButton(label)
             b.setObjectName("nav")
             b.setCheckable(True)
@@ -1280,7 +1484,13 @@ class Store(QWidget):
         self.search.setPlaceholderText("Search apps, games and tools in every source…")
         self.search.textChanged.connect(self.on_text)
         self.search.returnPressed.connect(self.do_search)
-        top.addWidget(self.search)
+        top.addWidget(self.search, 1)
+        self.update_btn = QPushButton("⟳  Update everything")
+        self.update_btn.setObjectName("update")
+        self.update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.update_btn.setToolTip("Update system packages, AUR and Flatpak apps in one go (runs in the terminal below)")
+        self.update_btn.clicked.connect(self.full_update)
+        top.addWidget(self.update_btn)
         main.addLayout(top)
         self.pillbar = QHBoxLayout()
         self.pillbar.setContentsMargins(32, 4, 32, 4)
@@ -1299,10 +1509,11 @@ class Store(QWidget):
         self.results = Page()
         self.installed_page = Page()
         self.updates_page = Page()
+        self.windows_page = WindowsPage(self)
         self.settings = Settings(self)
         self.detail = Detail(self)
         self.detail.back.connect(self.go_back)
-        for w in (self.onboarding, self.home, self.results, self.installed_page, self.updates_page, self.settings, self.detail):
+        for w in (self.onboarding, self.home, self.results, self.installed_page, self.windows_page, self.updates_page, self.settings, self.detail):
             self.stack.addWidget(w)
         self.split = QSplitter(Qt.Orientation.Vertical)
         self.split.setChildrenCollapsible(False)
@@ -1338,6 +1549,7 @@ class Store(QWidget):
             self.refresh_catalog(first=True)
         elif index.due() and not bk.service_enabled():
             QTimer.singleShot(4000, lambda: self.refresh_catalog(quiet=True))
+        QTimer.singleShot(7000, self.refresh_update_count)
         if not self.cfg.get("onboarded"):
             self.show_onboarding()
         else:
@@ -1384,7 +1596,8 @@ class Store(QWidget):
         c = FRAME
         self.legend.setText(f"<span style='color:{c['aur']}'>■</span> AUR &nbsp; <span style='color:{c['pacman']}'>■</span> Pacman<br>"
                             f"<span style='color:{c['flatpak']}'>■</span> Flatpak &nbsp; <span style='color:{c['appimage']}'>■</span> AppImage<br>"
-                            f"<span style='color:{c['snap']}'>■</span> Snap &nbsp; <span style='color:{GREEN}'>■</span> Installed")
+                            f"<span style='color:{c['snap']}'>■</span> Snap &nbsp; <span style='color:{c['wine']}'>■</span> Wine<br>"
+                            f"<span style='color:{GREEN}'>■</span> Installed")
 
     def set_theme(self, tid, custom=None):
         t = theme_by_id(tid, custom or self.cfg.get("custom_theme"))
@@ -1489,6 +1702,9 @@ class Store(QWidget):
         elif key == "installed":
             self.stack.setCurrentWidget(self.installed_page)
             self.build_installed()
+        elif key == "windows":
+            self.stack.setCurrentWidget(self.windows_page)
+            self.windows_page.build()
         elif key == "updates":
             self.stack.setCurrentWidget(self.updates_page)
             self.build_updates()
@@ -1561,13 +1777,43 @@ class Store(QWidget):
     def build_updates(self):
         pg = self.updates_page
         pg.clear()
-        pg.heading("Updates", "Sunshine OS updates pacman, the AUR, Flatpak and the rest together, with a restore point first.", "KEEP IT FRESH")
-        b = QPushButton("Update everything now")
+        pg.heading("Updates", "One button updates the system, the AUR and Flatpak together. The terminal below shows everything that happens.", "KEEP IT FRESH")
+        b = QPushButton("⟳  Update everything now")
         b.setObjectName("primary")
-        b.setFixedWidth(260)
-        b.clicked.connect(lambda: QProcess.startDetached("sunshine-update", []))
+        b.setFixedWidth(280)
+        b.clicked.connect(self.full_update)
         pg.v.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+        pg.v.addSpacing(8)
+        pg.v.addWidget(lbl("Checking what can be updated…", "muted"))
         pg.end()
+        def done(res):
+            if self.stack.currentWidget() is not pg:
+                return
+            pg.clear()
+            pg.heading("Updates", "One button updates the system, the AUR and Flatpak together. The terminal below shows everything that happens.", "KEEP IT FRESH")
+            b2 = QPushButton("⟳  Update everything now")
+            b2.setObjectName("primary")
+            b2.setFixedWidth(280)
+            b2.clicked.connect(self.full_update)
+            pg.v.addWidget(b2, 0, Qt.AlignmentFlag.AlignLeft)
+            if isinstance(res, Exception):
+                pg.v.addWidget(lbl(f"Could not check for updates: {res}", "muted", wrap=True))
+            else:
+                total = sum(len(v) for v in res.values())
+                pg.v.addSpacing(6)
+                pg.v.addWidget(lbl("Everything is up to date." if not total else f"{total} updates available", "h2"))
+                for title, key in (("System packages", "pacman"), ("AUR packages", "aur"), ("Flatpak apps", "flatpak")):
+                    items = res.get(key, [])
+                    if items:
+                        pg.v.addWidget(lbl(f"{title}  ·  {len(items)}", "h3"))
+                        box = lbl("\n".join(items[:60]) + ("\n…" if len(items) > 60 else ""), "dim")
+                        box.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                        box.setStyleSheet("font-family: monospace; font-size: 12px;")
+                        pg.v.addWidget(box)
+                self._updates = res
+                self.nav["updates"].setText("⬆   Updates" + (f"  ({total})" if total else ""))
+            pg.end()
+        spawn(bk.list_updates, on_done=done)
 
     # ---- search
     def on_text(self, text):
@@ -1601,43 +1847,106 @@ class Store(QWidget):
             self.results.message(f"Search failed: {res}")
             return
         self._results = res
-        self._filter = None
         self.render_results(q, ms)
 
     def render_results(self, q, ms=0):
-        # source filter pills with counts
+        """Source chips are multi-select toggles (remembered); results show only apps offered by a selected source."""
         while self.pillbar.count():
             w = self.pillbar.takeAt(0).widget()
             if w:
                 w.deleteLater()
         counts = {s: sum(1 for a in self._results if s in a.items) for s in bk.SOURCES}
-        opts = [(None, f"All  {len(self._results)}")] + [(s, f"{SRC_NAME[s]}  {n}") for s, n in counts.items() if n]
-        for s, text in opts:
-            b = QPushButton(text)
+        lab = lbl("SOURCES", "step")
+        self.pillbar.addWidget(lab)
+        for s in bk.SOURCES:
+            b = QPushButton(f"{SRC_NAME[s]}  {counts[s]}")
             b.setObjectName("pill")
             b.setCheckable(True)
-            b.setChecked(s == self._filter)
-            if s:
-                b.setStyleSheet(f"QPushButton#pill:checked {{ border-color: {FRAME[s]}; color: {FRAME[s] if s != 'pacman' else PARCH}; }}")
-            b.clicked.connect(lambda _, s=s: self.set_filter(s, q))
+            b.setChecked(s in self._src_on)
+            col = FRAME[s]
+            b.setStyleSheet(f"QPushButton#pill:checked {{ border-color: {col}; color: {col}; background: {rgba(col, 0.12)}; }}")
+            b.setToolTip("Click to include or leave out " + SRC_NAME[s])
+            b.clicked.connect(lambda _, s=s: self.toggle_source(s, q))
             self.pillbar.addWidget(b)
+        allb = QPushButton("All")
+        allb.setObjectName("pill")
+        allb.clicked.connect(lambda: self.set_sources(set(bk.SOURCES), q))
+        self.pillbar.addWidget(allb)
         self.pillbar.addStretch(1)
         self.pill_w.show()
-        apps = [a for a in self._results if self._filter is None or self._filter in a.items][:80]
+        on = self._src_on
+        eff_order = tuple(s for s in self.order if s in on)
+        apps = [a for a in self._results if any(s in on for s in a.items)][:80]
         pg = self.results
         pg.clear()
-        pg.heading(f"Results for “{q}”", f"{len(apps)} apps" + (f"  ·  {ms:.0f} ms" if ms else ""), "SEARCH")
+        shown = len(on) < len(bk.SOURCES)
+        pg.heading(f"Results for “{q}”", f"{len(apps)} apps" + (f"  ·  {len(on)} of {len(bk.SOURCES)} sources" if shown else "") + (f"  ·  {ms:.0f} ms" if ms else ""), "SEARCH")
         if not apps:
-            pg.message("Nothing found. Check the spelling, or try a more general word.")
+            pg.message("Nothing found in the selected sources. Try selecting more of them above, or a more general word.")
         for a in apps:
-            r = Row(a, self.order)
+            r = Row(a, eff_order)
             r.clicked.connect(self.open_app)
             pg.v.addWidget(r)
         pg.end()
 
-    def set_filter(self, s, q):
-        self._filter = s
+    def toggle_source(self, s, q):
+        on = set(self._src_on)
+        on.symmetric_difference_update({s})
+        self.set_sources(on or set(bk.SOURCES), q)
+
+    def set_sources(self, on, q):
+        self._src_on = set(on)
+        self.cfg["sources"] = [s for s in bk.SOURCES if s in self._src_on]
+        bk.save_config(self.cfg)
         self.render_results(q)
+
+    # ---- updates
+    def full_update(self):
+        if self.term.busy:
+            self.toast("Another task is running in the terminal. Wait for it or press Stop there.")
+            self.term_btn.setChecked(True)
+            return
+        self.term_btn.setChecked(True)
+        started = self.term.run(bk.full_update_argv(), "Updating everything",
+                                on_finished=lambda code: (bk.refresh_installed(), self.refresh_update_count(), self.go("updates") if self.nav["updates"].isChecked() else None))
+        if started:
+            self.toast("Updating system, AUR and Flatpak… you will be asked for your password once or twice.")
+
+    def refresh_update_count(self):
+        def done(res):
+            if isinstance(res, Exception):
+                return
+            n = sum(len(v) for v in res.values())
+            self._updates = res
+            self.nav["updates"].setText(f"⬆   Updates" + (f"  ({n})" if n else ""))
+            self.update_btn.setText("⟳  Update everything" + (f"  ({n})" if n else ""))
+        spawn(bk.list_updates, on_done=done)
+
+    # ---- Windows apps (Wine / Proton)
+    def install_windows(self, exe, runner="wine", add_only=False):
+        if add_only:
+            path = windows.add_to_menu(exe, runner=runner)
+            bk.refresh_installed()
+            self.toast("Added to the menu: " + os.path.basename(path))
+            self.go("windows")
+            return
+        if self.cfg.get("auto_terminal", True):
+            self.term_btn.setChecked(True)
+        argv = windows.install_argv(exe, runner)
+        def done(code):
+            bk.refresh_installed()
+            if windows.has_steam_shortcuts():
+                self.term.run(windows.run_steam_shortcuts(), "Creating menu entries",
+                              on_finished=lambda c: (bk.refresh_installed(), self.go("windows")))
+            else:
+                self.go("windows")
+        self.term.run(argv, "Installing " + os.path.basename(exe), on_finished=done)
+        self.toast("Installing " + os.path.basename(exe) + " with " + runner.title() + "…")
+
+    def run_steam_shortcuts(self):
+        if self.cfg.get("auto_terminal", True):
+            self.term_btn.setChecked(True)
+        self.term.run(windows.run_steam_shortcuts(), "Creating menu entries", on_finished=lambda c: (bk.refresh_installed(), self.go("windows")))
 
     # ---- install / remove (everything runs in the linked terminal)
     def run(self, pkg, remove=False):
@@ -1653,6 +1962,9 @@ class Store(QWidget):
         if code == 0:
             pkg.installed = not remove
             bk.refresh_installed()
+            if pkg.source == "wine" and remove:
+                self.go("windows")
+                return
             self.toast(("Removed " if remove else "Installed ") + pkg.label)
             if self.detail.pkg is pkg:
                 self.detail.show_app(self.detail.app, pkg)
@@ -1684,24 +1996,42 @@ def main():
                 w.go("settings")
             elif page == "installed":
                 w.go("installed")
+            elif page == "updates":
+                w.go("updates")
+            elif page == "windows":
+                w.go("windows")
+            elif page == "windows-ask":
+                w.go("windows")
+                QTimer.singleShot(600, lambda: w.windows_page.ask("/home/user/Downloads/GameSetup.exe"))
             elif page == "terminal":
                 w.term_btn.setChecked(True)
                 w.term.view.clear()
                 demo = ("printf 'Resolving dependencies...\\n'; for i in 10 40 70 100; do printf '\\r\\033[1m downloading\\033[0m [%3d%%]' $i; sleep 0.3; done; "
                         "printf '\\n\\033[32m::\\033[0m installing demo-package (1.0-1)\\n\\033[33mwarning:\\033[0m this is a coloured line\\n'; read -p 'Proceed? [Y/n] ' a; echo answered:$a")
                 w.term.run(["bash", "-c", demo], "demo")
-                QTimer.singleShot(3000, lambda: w.term.reader and (w.term.say("y\n", GOLD_B), w.term.reader.send("y\n")))
-            elif page in ("results", "detail"):
+                QTimer.singleShot(3000, lambda: w.term.reader and (w.term.reader.send("y\n")))
+            elif page in ("results", "detail", "popup"):
                 w.search.setText(q)
                 w.do_search()
         def detail():
-            if page == "detail":
+            if page in ("detail", "popup"):
                 rows = w.results.findChildren(Row)
                 if rows:
                     w.open_app(rows[0].app)
+                if page == "popup":
+                    QTimer.singleShot(1200, w.detail.open_popup)
+        def finish():
+            pm = w.grab()
+            pops = w.detail.findChildren(CommandPopup) if page == "popup" else []
+            if pops:
+                p = QPainter(pm)
+                p.drawPixmap(w.mapFromGlobal(pops[-1].pos()), pops[-1].grab())
+                p.end()
+            pm.save(out)
+            app.quit()
         QTimer.singleShot(300, setup)
         QTimer.singleShot(int(arg("--wait", "9000")) - 3000, detail)
-        QTimer.singleShot(int(arg("--wait", "9000")), lambda: (w.grab().save(out), app.quit()))
+        QTimer.singleShot(int(arg("--wait", "9000")), finish)
     return app.exec()
 
 
