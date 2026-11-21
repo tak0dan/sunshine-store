@@ -8,11 +8,13 @@ import hashlib
 import os
 import pty
 import re
+import shutil
 import signal
 import struct
 import subprocess
 import sys
 import termios
+import time
 import urllib.request
 
 from PyQt6.QtCore import QRect, QSize, Qt, QThread, QTimer, pyqtSignal, QProcess
@@ -396,16 +398,20 @@ class Card(QFrame):
         lay.setContentsMargins(14, 12, 14, 12)
         lay.setSpacing(12)
         ic = IconLabel(60)
-        ic.set_pkg(pkg.label, app.icon or pkg.icon)
+        ic.set_pkg(app.label, app.icon or pkg.icon)
         lay.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
         c = QVBoxLayout()
         c.setSpacing(2)
-        t = lbl(elide(pkg.label, 26), "h3")
+        t = lbl(elide(app.label, 26), "h3")
         d = lbl(elide(pkg.desc or "No description", 78), "dim", wrap=True)
         d.setStyleSheet("font-size: 12px;")
         d.setMaximumHeight(36)
         row = QHBoxLayout()
         row.setSpacing(8)
+        if app.is_new:
+            nl = lbl("★ NEW")
+            nl.setStyleSheet(f"font-size: 10px; color: {GOLD_B};")
+            row.addWidget(nl)
         for s in app.sources[:4]:
             tag = lbl(("● " if s == pkg.source else "○ ") + SRC_NAME[s])
             tag.setStyleSheet(f"font-size: 10px; color: {FRAME[s] if s != 'pacman' else PARCH_DIM};")
@@ -474,16 +480,18 @@ class Row(QFrame):
         lay.setContentsMargins(16, 10, 16, 10)
         lay.setSpacing(16)
         ic = IconLabel(56)
-        ic.set_pkg(pkg.label, app.icon or pkg.icon)
+        ic.set_pkg(app.label, app.icon or pkg.icon)
         lay.addWidget(ic)
         c = QVBoxLayout()
         c.setSpacing(1)
-        c.addWidget(lbl(pkg.label, "h3"))
+        c.addWidget(lbl(app.label, "h3"))
         d = lbl(elide(pkg.desc or "No description", 150), "dim", wrap=True)
         d.setStyleSheet("font-size: 12px;")
         d.setMaximumHeight(34)
         c.addWidget(d)
         tags = "   ".join(f"<span style='color:{FRAME[s] if s != 'pacman' else PARCH_DIM}'>{'●' if s == pkg.source else '○'}</span> {SRC_NAME[s]}" for s in app.sources)
+        if app.is_new:
+            tags = f"<span style='color:{GOLD_B}'>★ NEW</span>&nbsp;&nbsp;&nbsp;" + tags
         t = lbl(tags, wrap=True)
         t.setStyleSheet(f"font-size: 10px; color: {MUTED};")
         c.addWidget(t)
@@ -1056,7 +1064,7 @@ class Detail(QWidget):
 
         tabs = QHBoxLayout()
         self.tab_btns = []
-        for i, name in enumerate(("Overview", "Related versions", "Details")):
+        for i, name in enumerate(("Overview", "Related versions", "Related software", "Details")):
             t = QPushButton(name)
             t.setObjectName("pill")
             t.setCheckable(True)
@@ -1147,6 +1155,10 @@ class Detail(QWidget):
             self.body.v.addWidget(lbl("Release, -bin and -git builds of this app in the AUR.", "dim"))
             self.body.message("Looking…")
             spawn(bk.related, a.key, on_done=self.related_ready)
+        elif i == 2:
+            self.body.v.addWidget(lbl("Clients, plugins and forks of this app, and what it is a client or fork of.", "dim", wrap=True))
+            self.body.message("Looking…")
+            spawn(bk.related_software, a.key, a.label, on_done=self.software_ready)
         else:
             rows = [("Package", p.name), ("Source", SRC_NAME[p.source] + (f" ({p.repo})" if p.repo else "")), ("Version", p.version),
                     ("Maintainer", p.maintainer), ("Website", p.url), ("Votes", str(p.votes) if p.votes else ""),
@@ -1161,6 +1173,25 @@ class Detail(QWidget):
                     vl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
                     r.addWidget(vl, 1)
                     self.body.v.addLayout(r)
+        self.body.end()
+
+    def software_ready(self, res):
+        if self._idx != 2:
+            return
+        self.body.clear()
+        self.body.v.addWidget(lbl("Clients, plugins and forks of this app, and what it is a client or fork of.", "dim", wrap=True))
+        if isinstance(res, Exception) or not res:
+            self.body.message("No related software found in the catalogue yet.")
+            return
+        for g in res:
+            self.body.v.addSpacing(10)
+            self.body.v.addWidget(lbl(g.title, "h2"))
+            self.body.v.addWidget(lbl(g.sub, "dim"))
+            for a, conf, ev, origin in g.entries[:8]:
+                r = Row(a, self.store.order)
+                r.setToolTip(f"{origin} · confidence {conf:.0%}\n{ev}")
+                r.clicked.connect(self.store.open_app)
+                self.body.v.addWidget(r)
         self.body.end()
 
     def related_ready(self, res):
@@ -1371,6 +1402,8 @@ class Settings(QScrollArea):
         v.addWidget(self.svc)
         self.summary = lbl(bk.catalog_summary(), "muted")
         v.addWidget(self.summary)
+        self.srcs = lbl("", "muted", wrap=True)
+        v.addWidget(self.srcs)
         r = QHBoxLayout()
         self.refresh_btn = QPushButton("Refresh now")
         self.refresh_btn.clicked.connect(store.refresh_catalog)
@@ -1434,6 +1467,8 @@ class Settings(QScrollArea):
 
     def refresh_summary(self):
         self.summary.setText(bk.catalog_summary())
+        col = {"available": GREEN, "stale": GOLD_B, "unavailable": MUTED}
+        self.srcs.setText("<br>".join(f"<span style='color:{col.get(st, MUTED)}'>●</span> {txt}" for st, txt in bk.source_lines()))
 
 
 # ---------------------------------------------------------------------------------------------- main window
@@ -1447,6 +1482,9 @@ class Store(QWidget):
         self.procs, self._results, self._query = [], [], ""
         self._src_on = {s for s in self.cfg.get("sources", list(bk.SOURCES)) if s in bk.SOURCES} or set(bk.SOURCES)
         self._building = False
+        self._gen, self._gen_seen_at, self._first_build, self._ticks = index.generation(), time.time(), False, 0
+        self._rel_open: set = set()
+        self._was_running = False
 
         root = QHBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -1545,10 +1583,15 @@ class Store(QWidget):
         self._prev = self.home
         self.show_all = False
 
+        # The catalogue is on disk: show it at once and refresh in the background (never the other way round).
         if not index.exists():
             self.refresh_catalog(first=True)
-        elif index.due() and not bk.service_enabled():
+        elif (index.due() and not bk.service_enabled()) or index.maintenance_pending():
             QTimer.singleShot(4000, lambda: self.refresh_catalog(quiet=True))
+        self._watch = QTimer(self)                  # notices generations published by this app or by the background service
+        self._watch.setInterval(3000)
+        self._watch.timeout.connect(self.check_catalogue)
+        self._watch.start()
         QTimer.singleShot(7000, self.refresh_update_count)
         if not self.cfg.get("onboarded"):
             self.show_onboarding()
@@ -1658,8 +1701,9 @@ class Store(QWidget):
         if self._building:
             return
         self._building = True
+        self._first_build = first
         if first:
-            self.toast("Preparing the app catalog for the first time (about 10 seconds)…")
+            self.toast("Preparing the app catalog for the first time. Results appear as each source is ready…")
         self.settings.refresh_btn.setEnabled(False)
         def prog(m):
             self.settings.refresh_msg.setText(m)
@@ -1668,16 +1712,72 @@ class Store(QWidget):
                 self.toast(m)
         def done(res):
             self._building = False
+            self._first_build = False
             self.settings.refresh_btn.setEnabled(True)
             self.settings.refresh_summary()
             ok = not isinstance(res, Exception)
-            self.settings.refresh_msg.setText("Catalog is up to date." if ok else f"Could not refresh: {res}")
-            if first:
+            busy = ok and isinstance(res, dict) and res.get("busy")
+            self.settings.refresh_msg.setText("A refresh is already running; the catalogue updates by itself when it finishes." if busy else
+                                              "Catalog is up to date." if ok else f"Could not refresh: {res}")
+            if first and not busy:
                 self.toast("Catalog ready." if ok else f"Could not build the catalog: {res}")
-                if self.stack.currentWidget() is self.home or self.nav["home"].isChecked():
-                    self.go("home")
             bk.refresh_installed()
-        spawn(index.refresh, on_done=done, on_progress=prog, with_progress=True)
+            self.check_catalogue()
+        def work(progress):                          # "Refresh now" forces a real check of every source
+            return index.refresh(progress, force=not (first or quiet))
+        spawn(work, on_done=done, on_progress=prog, with_progress=True)
+
+    # ---- live catalogue updates
+    def check_catalogue(self):
+        """Polled every few seconds: cheap read of the active generation. A new one (published by a refresh started here or by the
+        background service) re-runs the current search against it, without touching the query, filters or scroll position."""
+        self._ticks += 1
+        g = index.generation()
+        if g != self._gen:
+            self._gen = g
+            self.catalogue_updated()
+        running = index.refresh_running()
+        if running and not self._building:
+            self.settings.refresh_msg.setText("Refreshing in the background…")
+        elif self._was_running and not running and not self._building:
+            self.settings.refresh_msg.setText("Catalog is up to date.")
+            self.settings.refresh_summary()
+        self._was_running = running
+        if self._ticks % 200 == 0 and not self._building and not running and index.due() and not bk.service_enabled():
+            self.refresh_catalog(quiet=True)             # re-entering after a long time: freshness check, not a forced download
+
+    def catalogue_updated(self):
+        self.settings.refresh_summary()
+        n = index.new_since(self._gen_seen_at)
+        self._gen_seen_at = time.time()
+        cur = self.stack.currentWidget()
+        if self._first_build:
+            if cur is self.home:
+                self.build_home()
+            if cur is self.results and self._query:
+                self.rerun_search()
+            return
+        if cur is self.results and self._query:
+            self.rerun_search()
+        self.toast("Catalogue updated" + (f"  ·  {n:,} new packages found" if n else ""))
+
+    def rerun_search(self):
+        q = self._query
+        def fin(res):
+            if q != self._query or isinstance(res, Exception):
+                return
+            self._keep_scroll(lambda: self.set_results(q, res))
+        spawn(bk.search_all, q, on_done=fin)
+
+    def set_results(self, q, res):
+        self._results = res
+        self.render_results(q)
+
+    def _keep_scroll(self, fn):
+        bar = self.results.verticalScrollBar()
+        pos = bar.value()
+        fn()
+        QTimer.singleShot(0, lambda: bar.setValue(pos))
 
     # ---- onboarding
     def show_onboarding(self):
@@ -1827,6 +1927,7 @@ class Store(QWidget):
         if not q or q == self._query and self.stack.currentWidget() is self.results:
             return
         self._query = q
+        self._rel_open = set()
         self.check_nav("")
         self.stack.setCurrentWidget(self.results)
         t0 = datetime.datetime.now()
@@ -1835,7 +1936,25 @@ class Store(QWidget):
                 return
             ms = (datetime.datetime.now() - t0).total_seconds() * 1000
             self.show_results(q, res, ms)
+            self.start_snap(q)
         spawn(bk.search_all, q, on_done=fin)
+
+    def start_snap(self, q):
+        """Snap Store results arrive after the local ones are on screen (a live request must never delay the catalogue)."""
+        if not shutil.which("snap"):
+            return
+        def fin(extra):
+            if q != self._query or isinstance(extra, Exception) or not extra or not isinstance(self._results, list):
+                return
+            by_key = {a.key: a for a in self._results}
+            for k, p in extra:
+                a = by_key.get(k)
+                if a is None:
+                    a = by_key[k] = bk.App(k)
+                    self._results.append(a)
+                a.items.setdefault("snap", p)
+            self._keep_scroll(lambda: self.render_results(q))
+        spawn(bk.snap_extra, q, [], on_done=fin)
 
     def show_results(self, q, res, ms=0):
         if isinstance(res, bk.NoCatalog):
@@ -1880,14 +1999,47 @@ class Store(QWidget):
         pg = self.results
         pg.clear()
         shown = len(on) < len(bk.SOURCES)
-        pg.heading(f"Results for “{q}”", f"{len(apps)} apps" + (f"  ·  {len(on)} of {len(bk.SOURCES)} sources" if shown else "") + (f"  ·  {ms:.0f} ms" if ms else ""), "SEARCH")
+        stale = getattr(self._results, "stale", [])
+        pg.heading(f"Results for “{q}”", f"{len(apps)} apps" + (f"  ·  {len(on)} of {len(bk.SOURCES)} sources" if shown else "") + (f"  ·  {ms:.0f} ms" if ms else "")
+                   + (f"  ·  ⚠ {'; '.join(stale)}" if stale else ""), "SEARCH")
         if not apps:
             pg.message("Nothing found in the selected sources. Try selecting more of them above, or a more general word.")
-        for a in apps:
-            r = Row(a, eff_order)
-            r.clicked.connect(self.open_app)
-            pg.v.addWidget(r)
+        HEAD = bk.HEAD_SIZE                                # best matches first, then what the catalogue knows around them
+        def add_rows(items):
+            for a in items:
+                r = Row(a, eff_order)
+                r.clicked.connect(self.open_app)
+                pg.v.addWidget(r)
+        add_rows(apps[:HEAD])
+        for grp in getattr(self._results, "related", []):       # clients, plugins, forks: found through the software searched for
+            ents = [e for e in grp.entries if any(s in on for s in e[0].items)]
+            if not ents:
+                continue
+            pg.v.addSpacing(16)
+            pg.v.addWidget(lbl(grp.title, "h2"))
+            pg.v.addWidget(lbl(grp.sub, "dim"))
+            opened = grp.title in self._rel_open
+            for a, conf, ev, origin in (ents if opened else ents[:5]):
+                r = Row(a, eff_order)
+                r.setToolTip(f"{origin} · confidence {conf:.0%}\n{ev}")
+                r.clicked.connect(self.open_app)
+                pg.v.addWidget(r)
+            if len(ents) > 5 and not opened:
+                more = QPushButton(f"Show {len(ents) - 5} more")
+                more.setObjectName("pill")
+                more.setFixedWidth(160)
+                more.clicked.connect(lambda _, t=grp.title: self.open_group(t, q))
+                pg.v.addWidget(more, 0, Qt.AlignmentFlag.AlignLeft)
+        if len(apps) > HEAD:
+            if any(any(s in on for s in e[0].items) for g in getattr(self._results, "related", []) for e in g.entries):
+                pg.v.addSpacing(16)
+                pg.v.addWidget(lbl("More results", "h2"))
+            add_rows(apps[HEAD:])
         pg.end()
+
+    def open_group(self, title, q):
+        self._rel_open.add(title)
+        self._keep_scroll(lambda: self.render_results(q))
 
     def toggle_source(self, s, q):
         on = set(self._src_on)

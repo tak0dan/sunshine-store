@@ -6,6 +6,10 @@ install:
 	install -Dm644 src/app.py      $(LIB)/app.py
 	install -Dm644 src/backend.py  $(LIB)/backend.py
 	install -Dm644 src/index.py    $(LIB)/index.py
+	install -Dm644 src/catalogue.py $(LIB)/catalogue.py
+	install -Dm644 src/sources.py  $(LIB)/sources.py
+	install -Dm644 src/identity.py $(LIB)/identity.py
+	install -Dm644 data/identities.json $(LIB)/identities.json
 	install -Dm644 src/themes.py   $(LIB)/themes.py
 	install -Dm644 src/windows.py  $(LIB)/windows.py
 	install -Dm644 src/appimage.py $(LIB)/appimage.py
@@ -20,4 +24,7 @@ install:
 	install -Dm644 data/sunshine-store-indexer.service $(DESTDIR)$(PREFIX)/lib/systemd/user/sunshine-store-indexer.service
 	install -Dm644 data/sunshine-store-indexer.timer   $(DESTDIR)$(PREFIX)/lib/systemd/user/sunshine-store-indexer.timer
 
-.PHONY: install
+test:
+	python3 -m unittest discover tests
+
+.PHONY: install test

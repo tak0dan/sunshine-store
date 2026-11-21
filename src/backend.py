@@ -12,6 +12,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 import appimage
+import identity
 import index
 import windows
 
@@ -50,6 +51,28 @@ class NoCatalog(Exception):
 
 
 @dataclass
+class RelGroup:
+    """Software related to the one searched for: "Clients & front-ends for Discord", "Fork of Firefox" ..."""
+    title: str
+    sub: str
+    kind: str
+    direction: str                 # "in": others point at the anchor; "out": the anchor points at them
+    total: int
+    entries: list = field(default_factory=list)      # [(App, confidence, evidence, origin)]
+
+
+class Results(list):
+    """Search results (Apps, best first) plus what the catalogue knows around them."""
+    related: list
+    generation: int
+    stale: list
+
+    def __init__(self, apps=()):
+        super().__init__(apps)
+        self.related, self.generation, self.stale = [], 0, []
+
+
+@dataclass
 class Pkg:
     name: str
     source: str                    # "aur" | "pacman" | "flatpak"
@@ -66,6 +89,11 @@ class Pkg:
     out_of_date: bool = False
     icon: str = ""                 # absolute path, http(s) URL, or theme icon name
     cats: str = ""
+    first_seen: int = 0            # when the catalogue first saw it (0 = indexed before tracking started)
+
+    @property
+    def is_new(self) -> bool:
+        return bool(self.first_seen) and time.time() - self.first_seen < index.NEW_DAYS * 86400
 
     @property
     def ident(self) -> str:
@@ -96,6 +124,18 @@ class App:
     @property
     def installed(self) -> bool:
         return any(p.installed for p in self.items.values())
+
+    @property
+    def is_new(self) -> bool:
+        return any(p.is_new for p in self.items.values())
+
+    @property
+    def label(self) -> str:
+        """The software's own name ("Discord"), not the name of whichever package happens to be preferred."""
+        for p in self.items.values():
+            if p.title:
+                return p.title
+        return self.pick().label
 
     @property
     def sources(self):
@@ -147,15 +187,43 @@ def set_service(on: bool) -> bool:
     return bool(r and r.returncode == 0)
 
 
+SOURCE_LABEL = {"aur": "AUR", "pacman": "Pacman", "flatpak": "Flathub", "appimage": "AppImage", "snap": "Snap"}
+
+
+def _age(hours) -> str:
+    if hours is None:
+        return "never"
+    if hours < 1:
+        return f"{int(hours * 60)} minutes ago"
+    return f"{hours:.1f} hours ago" if hours < 48 else f"{hours / 24:.0f} days ago"
+
+
 def catalog_summary() -> str:
     s = index.status()
     if not s["built"]:
         return "Catalog not built yet."
     ago = "never"
     if s["last_refresh"]:
-        h = (time.time() - s["last_refresh"]) / 3600
-        ago = f"{int(h * 60)} minutes ago" if h < 1 else f"{h:.1f} hours ago"
-    return f"{s['packages']:,} packages · updated {ago} · {s['active_hours']} h of active use since"
+        ago = _age((time.time() - s["last_refresh"]) / 3600)
+    run = "  ·  refreshing in the background…" if s.get("running") else ""
+    return f"{s['packages']:,} packages · catalogue generation {s['generation']} · updated {ago} · {s['active_hours']} h of active use since{run}"
+
+
+def source_lines() -> list:
+    """[(state, text)] per source for Settings: available / stale / unavailable with the age of its data."""
+    out = []
+    for x in index.source_status():
+        name = SOURCE_LABEL.get(x["source"], x["source"])
+        if x["state"] == "unavailable":
+            out.append((x["state"], f"{name}: not indexed yet"))
+        else:
+            tail = f" — {x['error']}" if x["error"] else ""
+            out.append((x["state"], f"{name}: {x['count']:,} records, checked {_age(x['age_hours'])}" + (f" (stale{tail}; still searchable)" if x["state"] == "stale" else "")))
+    return out
+
+
+def stale_notes() -> list:
+    return [f"{SOURCE_LABEL.get(x['source'], x['source'])} results are from {_age(x['age_hours'])}" for x in index.source_status() if x["state"] == "stale"]
 
 
 # ---------------------------------------------------------------- installed state
@@ -233,7 +301,8 @@ def _pkg(row, hp, hf) -> Pkg:
     nm = row["app_id"] and row["name"] or row["name"]
     return Pkg(name=row["name"], source=src, title=row["title"], version=row["version"], desc=row["desc"], installed=inst,
                votes=row["votes"], popularity=row["pop"], url=row["url"], repo=row["repo"], app_id=row["app_id"],
-               maintainer=row["maintainer"], out_of_date=bool(row["ood"]), icon=row["icon"], cats=row["cats"])
+               maintainer=row["maintainer"], out_of_date=bool(row["ood"]), icon=row["icon"], cats=row["cats"],
+               first_seen=row["first_seen"] if "first_seen" in row.keys() else 0)
 
 
 def rows_to_apps(rows, source: str | None = None, limit: int = 150) -> list:
@@ -244,7 +313,7 @@ def rows_to_apps(rows, source: str | None = None, limit: int = 150) -> list:
         if source and r["source"] != source:
             continue
         p = _pkg(r, hp, hf)
-        key = r["key"]
+        key = r["ident"] if "ident" in r.keys() else r["key"]          # one card per software identity, not per package name
         app = groups.get(key)
         if app is None:
             app = groups[key] = App(key)
@@ -290,23 +359,43 @@ def snap_search(query: str) -> list:
     return out
 
 
-def search_all(query: str, source: str | None = None) -> list:
+HEAD_SIZE = 5     # results shown above the relationship groups; exactly these are not repeated inside them
+REL_IN = {"client_for": "Clients & front-ends for", "integration_for": "Plugins & integrations for", "fork_of": "Forks & derivatives of"}
+REL_OUT = {"client_for": "A client for", "integration_for": "Extends", "fork_of": "A fork of"}
+
+
+def related_groups(anchors: list, exclude=()) -> list:
+    """Typed relationships around software identities as RelGroups. anchors: [(ident, label)]. Identities in `exclude`
+    (already in the main results) are left out so the same software never appears twice."""
+    label = dict(anchors)
+    groups = index.relations_for([i for i, _ in anchors], per_group=10)
+    if not groups:
+        return []
+    others = list(dict.fromkeys(it["other"] for g in groups for it in g["items"] if it["other"] not in exclude))
+    apps = {a.key: a for a in rows_to_apps(index.artifacts_of(others, per=6), limit=1000)}
+    out = []
+    for g in groups:
+        entries = [(apps[it["other"]], it["confidence"], it["evidence"], it["origin"]) for it in g["items"] if it["other"] in apps]
+        if not entries:
+            continue
+        who = label.get(g["anchor"], g["anchor"])
+        if g["dir"] == "in":
+            out.append(RelGroup(f"{REL_IN[g['kind']]} {who}", f"{g['total']} found through {who}", g["kind"], "in", g["total"], entries))
+        else:
+            out.append(RelGroup(f"{who}: {REL_OUT[g['kind']].lower()}", f"{who} is related to this software", g["kind"], "out", g["total"], entries))
+    return out
+
+
+def search_all(query: str, source: str | None = None) -> Results:
+    """Search the local catalogue only (no network, so it is instant even offline). Snap Store results are merged in later by
+    snap_extra(), and the result carries relationship groups for the software that matched."""
     if not index.exists():
         raise NoCatalog()
-    apps = rows_to_apps(index.search(query), source)
-    if source in (None, "snap"):
-        by_key = {a.key: a for a in apps}
-        for p in snap_search(query):
-            k = index.normalize(p.name)
-            a = by_key.get(k)
-            if a is None:
-                a = by_key[k] = App(k)
-                apps.append(a)
-            a.items.setdefault("snap", p)
+    res = Results(rows_to_apps(index.search(query), source))
     ql = query.lower()
     local = [p for p in windows_pkgs() if ql in p.name.lower()]
     if source in (None, "wine") and local:
-        by_key = {a.key: a for a in apps}
+        by_key = {a.key: a for a in res}
         front = []
         for p in local:
             k = index.normalize(p.name)
@@ -315,8 +404,26 @@ def search_all(query: str, source: str | None = None) -> list:
                 a = App(k)
                 front.append(a)
             a.items["wine"] = p
-        apps = front + apps
-    return apps
+        res = Results(front + list(res))
+    res.generation = index.generation()
+    res.stale = stale_notes()
+    # anchors: the software the query names (exact identity / alias), else the best match
+    want = identity.slug(query)
+    anchors = [(a.key, a.label) for a in res if a.key == want and a.items.keys() - {"wine"}] or \
+              [(a.key, a.label) for a in res[:1] if a.items.keys() - {"wine"}]
+    try:                                               # the head of the list is what the user sees at once: don't repeat it below
+        res.related = related_groups(anchors[:2], exclude={a.key for a in res[:HEAD_SIZE]})
+    except Exception:                                  # relationships are an extra; never lose the search results over them
+        res.related = []
+    return res
+
+
+def snap_extra(query: str, have_keys: list) -> list:
+    """Live Snap Store results for the query, as [(key, Pkg)]; called after the local results are already on screen."""
+    out = []
+    for p in snap_search(query):
+        out.append((index.normalize(p.name), p))
+    return out
 
 
 def resolve(names: list) -> list:
@@ -335,11 +442,11 @@ def resolve(names: list) -> list:
         r = by_name.get(n.lower())
         if r is None:
             continue
-        a = App(r["key"])
+        a = App(r["ident"])
         a.items[r["source"]] = _pkg(r, hp, hf)
         # also offer the same app from other sources when the catalog has them
         for r2 in index.search(r["key"], 60):
-            if r2["key"] == r["key"] and r2["source"] not in a.items and not (r2["source"] == "aur" and r2["name"].endswith(VARIANT_SUFFIXES)):
+            if r2["ident"] == r["ident"] and r2["source"] not in a.items and not (r2["source"] == "aur" and r2["name"].endswith(VARIANT_SUFFIXES)):
                 a.items[r2["source"]] = _pkg(r2, hp, hf)
         apps.append(a)
     return apps
@@ -353,11 +460,11 @@ def interest_shelf(iid: str, per: int = 10) -> tuple:
             seen = {a.key for a in apps}
             hp, hf = installed_pacman(), installed_flatpak()
             for r in index.by_category(cats, "pacman", per * 2):
-                if r["key"] not in seen and len(apps) < per:
-                    a = App(r["key"])
+                if r["ident"] not in seen and len(apps) < per:
+                    a = App(r["ident"])
                     a.items["pacman"] = _pkg(r, hp, hf)
                     apps.append(a)
-                    seen.add(r["key"])
+                    seen.add(r["ident"])
             return f"{emoji}  {label}", apps[:per]
     return iid, []
 
@@ -365,13 +472,14 @@ def interest_shelf(iid: str, per: int = 10) -> tuple:
 def trending_aur(n: int = 12) -> list:
     if not index.exists():
         return []
-    import sqlite3
-    db = index._db()
-    try:
-        rows = db.execute("SELECT * FROM pkgs WHERE source='aur' AND ood=0 ORDER BY pop DESC LIMIT ?", (n * 3,)).fetchall()
-    finally:
-        db.close()
-    return rows_to_apps(rows, "aur", n)
+    return rows_to_apps(index.trending("aur", n * 3), "aur", n)
+
+
+def related_software(ident: str, label: str) -> list:
+    """Relationship groups for one product page (clients, plugins, forks of it; what it is a client or fork of)."""
+    if not index.exists():
+        return []
+    return related_groups([(ident, label)])
 
 
 def related(base: str) -> list:

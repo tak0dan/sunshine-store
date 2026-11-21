@@ -1,0 +1,27 @@
+{
+  "_comment": "Curated corrections for the Sunshine Store identity graph. Entries are skipped when the identity is not in the catalogue. Users can add their own in ~/.config/sunshine-store/identities.json (same format; 'deny' removes a relation).",
+  "aliases": {
+    "visual-studio-code": ["vscode", "code"],
+    "telegram-desktop": ["telegram"],
+    "obs-studio": ["obs"],
+    "discord": ["discord_arch_electron"]
+  },
+  "relations": [
+    {"src": "vesktop", "dst": "discord", "kind": "client_for", "evidence": "Alternative Discord client with Vencord"},
+    {"src": "discord-rpc", "dst": "discord", "kind": "integration_for", "evidence": "Discord Rich Presence library"},
+    {"src": "ncspot", "dst": "spotify", "kind": "client_for", "evidence": "ncurses Spotify client"},
+    {"src": "spotifyd", "dst": "spotify", "kind": "client_for", "evidence": "Spotify Connect daemon"},
+    {"src": "spicetify-cli", "dst": "spotify", "kind": "integration_for", "evidence": "Customises the Spotify client"},
+    {"src": "vscodium", "dst": "visual-studio-code", "kind": "fork_of", "evidence": "Community binaries of VS Code"},
+    {"src": "librewolf", "dst": "firefox", "kind": "fork_of", "evidence": "Firefox fork"},
+    {"src": "floorp", "dst": "firefox", "kind": "fork_of", "evidence": "Firefox-based browser"},
+    {"src": "zen-browser", "dst": "firefox", "kind": "fork_of", "evidence": "Firefox-based browser"},
+    {"src": "waterfox", "dst": "firefox", "kind": "fork_of", "evidence": "Firefox-based browser"},
+    {"src": "ungoogled-chromium", "dst": "chromium", "kind": "fork_of", "evidence": "Chromium without Google services"},
+    {"src": "betterbird", "dst": "thunderbird", "kind": "fork_of", "evidence": "Fine-tuned Thunderbird"},
+    {"src": "kotatogram-desktop", "dst": "telegram-desktop", "kind": "fork_of", "evidence": "Telegram Desktop fork"},
+    {"src": "materialgram", "dst": "telegram-desktop", "kind": "fork_of", "evidence": "Telegram Desktop based messenger"},
+    {"src": "ayugram-desktop", "dst": "telegram-desktop", "kind": "client_for", "evidence": "Telegram client"}
+  ],
+  "deny": []
+}
