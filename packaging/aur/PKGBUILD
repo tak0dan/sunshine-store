@@ -20,7 +20,7 @@ optdepends=('libjxl: icons of repository apps'
             'inter-font: interface font'
             'ttf-cormorant: heading font')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('8d0c838f466dedb5d6e403cb64b63e8ca3db42bd4e5b170931b27e4b05305a2e')
+sha256sums=('ac06890d662eb7195800a05342a894685b3ebf87a017831f9052973f1a4b2b5c')
 
 package() {
   cd "$pkgname-$pkgver"
