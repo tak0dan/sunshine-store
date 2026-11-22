@@ -6,7 +6,10 @@ import tempfile
 import threading
 import unittest
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# This suite is intentionally headless.  Respecting a desktop session's
+# Wayland/XCB setting makes Qt load a display plugin during unittest discovery
+# and can abort the entire test process on machines without a usable display.
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_catalogue as T   # noqa: E402  (also puts src/ on sys.path and sets offline mode)
 
