@@ -1,6 +1,6 @@
 # Maintainer: tak0dan
 pkgname=sunshine-store
-pkgver=0.4.0
+pkgver=0.4.1
 pkgrel=1
 pkgdesc="Microsoft-Store-style app shop for Arch: pacman, AUR, Flatpak, AppImage and Snap with an instant, always-available catalogue and related-software discovery"
 arch=('any')
